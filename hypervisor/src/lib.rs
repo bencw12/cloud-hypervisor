@@ -32,6 +32,9 @@ pub mod arch;
 /// KVM implementation module
 pub mod kvm;
 
+/// SEV module
+pub mod sev;
+
 /// Microsoft Hypervisor implementation module
 #[cfg(all(feature = "mshv", target_arch = "x86_64"))]
 pub mod mshv;

@@ -408,6 +408,14 @@ fn create_app<'a>(
             .group("vm-config"),
     );
 
+    #[cfg(feature = "sev")]
+    let app = app.arg(
+        Arg::new("sev")
+            .long("sev")
+            .help("Enables SEV guest")
+            .takes_value(false),
+    );
+
     app
 }
 
@@ -727,6 +735,8 @@ mod unit_tests {
             iommu: false,
             #[cfg(target_arch = "x86_64")]
             sgx_epc: None,
+            #[cfg(target_arch = "x86_64")]
+            sev: false,
             numa: None,
             watchdog: false,
             #[cfg(feature = "tdx")]

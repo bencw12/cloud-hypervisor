@@ -357,6 +357,8 @@ pub struct VmParams<'a> {
     pub vsock: Option<&'a str>,
     #[cfg(target_arch = "x86_64")]
     pub sgx_epc: Option<Vec<&'a str>>,
+    #[cfg(target_arch = "x86_64")]
+    pub sev: bool,
     pub numa: Option<Vec<&'a str>>,
     pub watchdog: bool,
     #[cfg(feature = "tdx")]
@@ -391,6 +393,8 @@ impl<'a> VmParams<'a> {
         let vsock: Option<&str> = args.value_of("vsock");
         #[cfg(target_arch = "x86_64")]
         let sgx_epc: Option<Vec<&str>> = args.values_of("sgx-epc").map(|x| x.collect());
+        #[cfg(target_arch = "x86_64")]
+        let sev: bool = args.is_present("sev");
         let numa: Option<Vec<&str>> = args.values_of("numa").map(|x| x.collect());
         let watchdog = args.is_present("watchdog");
         let platform = args.value_of("platform");
@@ -419,6 +423,8 @@ impl<'a> VmParams<'a> {
             vsock,
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
+            #[cfg(target_arch = "x86_64")]
+            sev,
             numa,
             watchdog,
             #[cfg(feature = "tdx")]
@@ -2286,6 +2292,8 @@ pub struct VmConfig {
     #[cfg(feature = "gdb")]
     pub gdb: bool,
     pub platform: Option<PlatformConfig>,
+    #[cfg(target_arch = "x86_64")]
+    pub sev: bool,
 }
 
 impl VmConfig {
@@ -2627,6 +2635,16 @@ impl VmConfig {
             }
         }
 
+        #[cfg(target_arch = "x86_64")]
+        let mut sev = false;
+        #[cfg(target_arch = "x86_64")]
+        {
+            if vm_params.sev {
+                //initialize sev
+                sev = true;
+            }
+        }
+
         let mut numa: Option<Vec<NumaConfig>> = None;
         if let Some(numa_list) = &vm_params.numa {
             let mut numa_config_list = Vec::new();
@@ -2678,6 +2696,8 @@ impl VmConfig {
             iommu: false, // updated in VmConfig::validate()
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
+            #[cfg(target_arch = "x86_64")]
+            sev,
             numa,
             watchdog: vm_params.watchdog,
             #[cfg(feature = "tdx")]
@@ -3299,6 +3319,8 @@ mod tests {
             iommu: false,
             #[cfg(target_arch = "x86_64")]
             sgx_epc: None,
+            #[cfg(target_arch = "x86_64")]
+            sev: false,
             numa: None,
             watchdog: false,
             #[cfg(feature = "tdx")]

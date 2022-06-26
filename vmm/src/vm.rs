@@ -53,6 +53,8 @@ use devices::interrupt_controller::{self, InterruptController};
 use devices::AcpiNotificationFlags;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
+#[cfg(feature = "sev")]
+use hypervisor::sev::Sev;
 use hypervisor::{HypervisorVmError, VmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(feature = "guest_debug")]
@@ -482,6 +484,8 @@ pub struct Vm {
     stop_on_boot: bool,
     #[cfg(target_arch = "x86_64")]
     load_kernel_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
+    #[cfg(all(feature = "sev", target_arch = "x86_64"))]
+    sev: Arc<Mutex<Option<Sev>>>,
 }
 
 impl Vm {
@@ -508,9 +512,20 @@ impl Vm {
             .transpose()
             .map_err(Error::KernelFile)?;
 
+        #[cfg(feature = "sev")]
+        let mut sev = None;
+        #[cfg(feature = "sev")]
+        if config.lock().unwrap().sev {
+            let mut sev_dev = Sev::new(vm.fd().clone());
+            sev_dev.sev_init().unwrap();
+            sev = Some(sev_dev);
+        }
+        #[cfg(feature = "sev")]
+        let sev_mutex = Arc::new(Mutex::new(sev));
+
         #[cfg(target_arch = "x86_64")]
         let load_kernel_handle = if !restoring {
-            Self::load_kernel_async(&kernel, &memory_manager, &config)?
+            Self::load_kernel_async(&kernel, &memory_manager, &config, #[cfg(feature = "sev")] &sev_mutex)?
         } else {
             None
         };
@@ -626,6 +641,8 @@ impl Vm {
             stop_on_boot,
             #[cfg(target_arch = "x86_64")]
             load_kernel_handle,
+            #[cfg(all(feature = "sev", target_arch = "x86_64"))]
+            sev: sev_mutex,
         })
     }
 
@@ -997,8 +1014,12 @@ impl Vm {
         mut kernel: File,
         cmdline: Cmdline,
         memory_manager: Arc<Mutex<MemoryManager>>,
+        #[cfg(feature = "sev")] sev: Arc<Mutex<Option<Sev>>>,
     ) -> Result<EntryPoint> {
         use linux_loader::loader::{elf::Error::InvalidElfMagicNumber, Error::Elf};
+        #[cfg(feature = "sev")]
+        use vm_memory::GuestMemory;
+
         info!("Loading kernel");
 
         let mem = {
@@ -1011,7 +1032,18 @@ impl Vm {
             &mut kernel,
             Some(arch::layout::HIGH_RAM_START),
         ) {
-            Ok(entry_addr) => entry_addr,
+            Ok(entry_addr) => {
+                #[cfg(feature = "sev")]
+                if sev.lock().unwrap().is_some() {
+                    //Workaround to not have to modify linux_loader
+                    //Both OVMF and rust-hypervisor-firmware loaded at 0x100000
+                    let addr = mem.deref().get_host_address(GuestAddress(0x100000)).unwrap() as u64;
+                    let size = entry_addr.kernel_end - (entry_addr.kernel_end % 16) + 16;
+                    let size = size - 0x100000;
+                    sev.lock().unwrap().as_mut().unwrap().launch_update_data(addr, size.try_into().unwrap()).unwrap()
+                }
+                entry_addr
+            },
             Err(e) => match e {
                 Elf(InvalidElfMagicNumber) => {
                     // Not an ELF header - assume raw binary data / firmware
@@ -1077,6 +1109,7 @@ impl Vm {
         kernel: &Option<File>,
         memory_manager: &Arc<Mutex<MemoryManager>>,
         config: &Arc<Mutex<VmConfig>>,
+        #[cfg(feature = "sev")] sev: &Arc<Mutex<Option<Sev>>>,
     ) -> Result<Option<thread::JoinHandle<Result<EntryPoint>>>> {
         // Kernel with TDX is loaded in a different manner
         #[cfg(feature = "tdx")]
@@ -1090,12 +1123,14 @@ impl Vm {
                 let kernel = kernel.try_clone().unwrap();
                 let config = config.clone();
                 let memory_manager = memory_manager.clone();
+                #[cfg(feature = "sev")]
+                let sev = sev.clone();
 
                 std::thread::Builder::new()
                     .name("kernel_loader".into())
                     .spawn(move || {
                         let cmdline = Self::generate_cmdline(&config)?;
-                        Self::load_kernel(kernel, cmdline, memory_manager)
+                        Self::load_kernel(kernel, cmdline, memory_manager, #[cfg(feature = "sev")] sev)
                     })
                     .map_err(Error::KernelLoadThreadSpawn)
             })
@@ -1138,6 +1173,8 @@ impl Vm {
             rsdp_addr,
             sgx_epc_region,
             serial_number.as_deref(),
+            #[cfg(feature = "sev")]
+            &mut self.sev.lock().unwrap(),
         )
         .map_err(Error::ConfigureSystem)?;
         Ok(())
@@ -2153,6 +2190,12 @@ impl Vm {
                 self.configure_system(rsdp_addr.unwrap())
             })
             .transpose()?;
+        
+        #[cfg(all(feature = "sev", target_arch = "x86_64"))]
+        if self.sev.lock().unwrap().is_some() {
+            self.sev.lock().unwrap().as_mut().unwrap().get_launch_measurement().unwrap();
+            self.sev.lock().unwrap().as_mut().unwrap().sev_launch_finish().unwrap();
+        }
 
         #[cfg(feature = "tdx")]
         if let Some(hob_address) = hob_address {

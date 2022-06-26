@@ -15,6 +15,8 @@ pub mod regs;
 use crate::GuestMemoryMmap;
 use crate::InitramfsConfig;
 use crate::RegionType;
+#[cfg(feature = "sev")]
+use hypervisor::sev::Sev;
 use hypervisor::x86_64::{CpuId, CpuIdEntry, CPUID_FLAG_VALID_INDEX};
 use hypervisor::HypervisorError;
 use linux_loader::loader::bootparam::boot_params;
@@ -840,6 +842,7 @@ pub fn configure_system(
     rsdp_addr: Option<GuestAddress>,
     sgx_epc_region: Option<SgxEpcRegion>,
     serial_number: Option<&str>,
+    #[cfg(feature = "sev")] sev: &mut Option<Sev>,
 ) -> super::Result<()> {
     // Write EBDA address to location where ACPICA expects to find it
     guest_mem
@@ -866,6 +869,8 @@ pub fn configure_system(
         initramfs,
         rsdp_addr,
         sgx_epc_region,
+        #[cfg(feature = "sev")]
+        sev,
     )
 }
 
@@ -875,6 +880,7 @@ fn configure_pvh(
     initramfs: &Option<InitramfsConfig>,
     rsdp_addr: Option<GuestAddress>,
     sgx_epc_region: Option<SgxEpcRegion>,
+    #[cfg(feature = "sev")] sev: &mut Option<Sev>,
 ) -> super::Result<()> {
     const XEN_HVM_START_MAGIC_VALUE: u32 = 0x336ec578;
 
@@ -982,6 +988,15 @@ fn configure_pvh(
             memmap_start_addr.unchecked_add(mem::size_of::<hvm_memmap_table_entry>() as u64);
     }
 
+    // Encrypt pvh memmap entries if SEV is enabled
+    #[cfg(feature = "sev")]
+    if let Some(sev) = sev {
+        let addr = guest_mem.get_host_address(layout::MEMMAP_START).unwrap() as u64;
+        let len = memmap_start_addr.0 - layout::MEMMAP_START.0;
+        let len = len - (len % 16) + 16;
+        sev.launch_update_data(addr, len.try_into().unwrap()).unwrap()
+    }
+
     // The hvm_start_info struct itself must be stored at PVH_START_INFO
     // address, and %rbx will be initialized to contain PVH_INFO_START prior to
     // starting the guest, as required by the PVH ABI.
@@ -995,6 +1010,14 @@ fn configure_pvh(
     guest_mem
         .write_obj(start_info, start_info_addr)
         .map_err(|_| super::Error::StartInfoSetup)?;
+
+    #[cfg(feature = "sev")]
+    if let Some(sev) = sev {
+        let addr = guest_mem.get_host_address(layout::PVH_INFO_START).unwrap() as u64;
+        let len = mem::size_of::<hvm_start_info>() as u32;
+        let len = len - (len % 16) + 16;
+        sev.launch_update_data(addr, len).unwrap();
+    }
 
     Ok(())
 }
@@ -1196,6 +1219,7 @@ mod tests {
             Some(layout::RSDP_POINTER),
             None,
             None,
+            #[cfg(feature = "sev")] &mut None,
         );
         assert!(config_err.is_err());
 
@@ -1209,7 +1233,7 @@ mod tests {
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
 
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")]&mut None).unwrap();
 
         // Now assigning some memory that is equal to the start of the 32bit memory hole.
         let mem_size = 3328 << 20;
@@ -1220,9 +1244,9 @@ mod tests {
             .map(|r| (r.0, r.1))
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")] &mut None).unwrap();
 
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")] &mut None).unwrap();
 
         // Now assigning some memory that falls after the 32bit memory hole.
         let mem_size = 3330 << 20;
@@ -1233,9 +1257,9 @@ mod tests {
             .map(|r| (r.0, r.1))
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")] &mut None).unwrap();
 
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None).unwrap();
+        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")] &mut None).unwrap();
     }
 
     #[test]

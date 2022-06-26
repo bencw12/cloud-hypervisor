@@ -14,6 +14,7 @@ guest_debug = ["kvm"]
 kvm = ["hypervisor/kvm", "vfio-ioctls/kvm", "vm-device/kvm", "pci/kvm"]
 mshv = ["hypervisor/mshv", "virtio-devices/mshv", "vfio-ioctls/mshv", "vm-device/mshv", "pci/mshv"]
 tdx = ["arch/tdx", "hypervisor/tdx"]
+sev = ["arch/sev", "hypervisor/sev"]
 
 [dependencies]
 acpi_tables = { path = "../acpi_tables" }

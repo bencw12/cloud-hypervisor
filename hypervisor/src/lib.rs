@@ -33,6 +33,7 @@ pub mod arch;
 pub mod kvm;
 
 /// SEV module
+#[cfg(feature = "sev")]
 pub mod sev;
 
 /// Microsoft Hypervisor implementation module

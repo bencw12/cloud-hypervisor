@@ -235,6 +235,12 @@ impl vm::Vm for KvmVm {
             .map_err(|e| vm::HypervisorVmError::UnregisterIrqFd(e.into()))
     }
     ///
+    /// Gets VmFd
+    ///
+    fn fd(&self) -> Arc<VmFd> {
+        self.fd.clone()
+    }
+    ///
     /// Creates a VcpuFd object from a vcpu RawFd.
     ///
     fn create_vcpu(

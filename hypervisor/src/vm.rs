@@ -26,6 +26,7 @@ use crate::CreateDevice;
 use crate::{IoEventAddress, IrqRoutingEntry, MemoryRegion};
 #[cfg(feature = "kvm")]
 use kvm_ioctls::Cap;
+use kvm_ioctls::VmFd;
 #[cfg(target_arch = "x86_64")]
 use std::fs::File;
 use std::sync::Arc;
@@ -278,6 +279,8 @@ pub trait Vm: Send + Sync {
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
     /// Creates a new KVM vCPU file descriptor and maps the memory corresponding
     fn create_vcpu(&self, id: u8, vm_ops: Option<Arc<dyn VmOps>>) -> Result<Arc<dyn Vcpu>>;
+    /// Gets VmFd
+    fn fd(&self) -> Arc<VmFd>;
     #[cfg(target_arch = "aarch64")]
     fn create_vgic(
         &self,

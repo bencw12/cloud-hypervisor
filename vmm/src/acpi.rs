@@ -595,7 +595,6 @@ pub fn create_acpi_tables(
     let start_time = Instant::now();
     let rsdp_offset = arch::layout::RSDP_POINTER;
     let mut tables: Vec<u64> = Vec::new();
-
     // DSDT
     let dsdt = create_dsdt_table(device_manager, cpu_manager, memory_manager);
     let dsdt_offset = rsdp_offset.checked_add(Rsdp::len() as u64).unwrap();
@@ -747,6 +746,7 @@ pub fn create_acpi_tables(
         guest_mem
             .write_slice(viot.as_slice(), viot_offset)
             .expect("Error writing VIOT table");
+
         tables.push(viot_offset.0);
         prev_tbl_len = viot.len() as u64;
         prev_tbl_off = viot_offset;

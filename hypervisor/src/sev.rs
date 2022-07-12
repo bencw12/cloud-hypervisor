@@ -13,10 +13,18 @@ use kvm_bindings::{
 use kvm_ioctls::VmFd;
 use std::fmt::Display;
 use std::fs::File;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::path::PathBuf;
 use std::{arch::x86_64::__cpuid, fs::OpenOptions, os::unix::prelude::AsRawFd, sync::Arc, u64};
 use thiserror::Error;
+use vm_memory::Bytes;
+use vm_memory::GuestAddress;
+use vm_memory::GuestMemory;
 
 const MEASUREMENT_LEN: u32 = 48;
+pub const FIRMWARE_ADDR: u64 = 0x100000;
+const KERNEL_ADDR: u64 = 0x2000000;
 
 //This excludes SUCCESS=0 and ACTIVE=18
 #[derive(Debug, Error)]
@@ -148,6 +156,42 @@ impl Sev {
             measure: Vec::with_capacity(48),
             _cbitpos: ebx,
         }
+    }
+
+    // load kernel unencrypted
+    pub fn load_kernel<M: GuestMemory>(
+        &mut self,
+        mem: &M,
+        kernel_path: &PathBuf,
+    ) -> SevResult<u32> {
+        let mut f = File::open(kernel_path.as_path()).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        let len = f.seek(SeekFrom::End(0)).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+
+        mem.read_exact_from(GuestAddress(KERNEL_ADDR), &mut f, len.try_into().unwrap())
+            .unwrap();
+        Ok(len as u32)
+    }
+    // Load the SEV firmware and encrypt
+    pub fn load_firmware<M: GuestMemory>(
+        &mut self,
+        mem: &M,
+        firmware_path: &PathBuf,
+    ) -> SevResult<()> {
+        let mut f = File::open(firmware_path.as_path()).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        let len = f.seek(SeekFrom::End(0)).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+
+        mem.read_exact_from(GuestAddress(FIRMWARE_ADDR), &mut f, len.try_into().unwrap())
+            .unwrap();
+
+        let addr = mem.get_host_address(GuestAddress(FIRMWARE_ADDR)).unwrap() as u64;
+        let len = len - (len % 16) + 16;
+        self.launch_update_data(addr, len as u32).unwrap();
+
+        Ok(())
     }
 
     fn sev_ioctl(&mut self, cmd: &mut kvm_sev_cmd) -> SevResult<()> {

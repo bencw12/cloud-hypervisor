@@ -30,6 +30,10 @@ use vm_memory::{
     GuestMemoryRegion, GuestUsize,
 };
 mod smbios;
+#[cfg(feature = "sev")]
+use self::layout::SMBIOS_START;
+#[cfg(feature = "sev")]
+use self::mptable::compute_mp_size;
 use std::arch::x86_64;
 #[cfg(feature = "tdx")]
 pub mod tdx;
@@ -843,18 +847,43 @@ pub fn configure_system(
     sgx_epc_region: Option<SgxEpcRegion>,
     serial_number: Option<&str>,
     #[cfg(feature = "sev")] sev: &mut Option<Sev>,
+    #[cfg(feature = "sev")] kernel_len: u32,
 ) -> super::Result<()> {
     // Write EBDA address to location where ACPICA expects to find it
     guest_mem
         .write_obj((layout::EBDA_START.0 >> 4) as u16, layout::EBDA_POINTER)
         .map_err(Error::EbdaSetup)?;
 
+    #[cfg(feature = "sev")]
+    if let Some(sev) = sev {
+        let addr = guest_mem.get_host_address(layout::EBDA_POINTER).unwrap() as u64;
+        let addr = addr - (addr % 16);
+        let len = 32;
+        sev.launch_update_data(addr, len as u32).unwrap();
+    }
     let size = smbios::setup_smbios(guest_mem, serial_number).map_err(Error::SmbiosSetup)?;
+
+    #[cfg(feature = "sev")]
+    if let Some(sev) = sev {
+        let addr = guest_mem
+            .get_host_address(GuestAddress(SMBIOS_START))
+            .unwrap() as u64;
+        let len = size - (size % 16) + 16 + 32;
+        sev.launch_update_data(addr, len as u32).unwrap();
+    }
 
     // Place the MP table after the SMIOS table aligned to 16 bytes
     let offset = GuestAddress(layout::SMBIOS_START).unchecked_add(size);
     let offset = GuestAddress((offset.0 + 16) & !0xf);
     mptable::setup_mptable(offset, guest_mem, _num_cpus).map_err(Error::MpTableSetup)?;
+
+    #[cfg(feature = "sev")]
+    if let Some(sev) = sev {
+        let addr = guest_mem.get_host_address(offset).unwrap() as u64;
+        let mpsize = compute_mp_size(_num_cpus);
+        let len = mpsize - (mpsize % 16) + 16;
+        sev.launch_update_data(addr, len as u32).unwrap();
+    }
 
     // Check that the RAM is not smaller than the RSDP start address
     if let Some(rsdp_addr) = rsdp_addr {
@@ -871,6 +900,8 @@ pub fn configure_system(
         sgx_epc_region,
         #[cfg(feature = "sev")]
         sev,
+        #[cfg(feature = "sev")]
+        kernel_len,
     )
 }
 
@@ -881,6 +912,7 @@ fn configure_pvh(
     rsdp_addr: Option<GuestAddress>,
     sgx_epc_region: Option<SgxEpcRegion>,
     #[cfg(feature = "sev")] sev: &mut Option<Sev>,
+    #[cfg(feature = "sev")] kernel_len: u32,
 ) -> super::Result<()> {
     const XEN_HVM_START_MAGIC_VALUE: u32 = 0x336ec578;
 
@@ -994,7 +1026,8 @@ fn configure_pvh(
         let addr = guest_mem.get_host_address(layout::MEMMAP_START).unwrap() as u64;
         let len = memmap_start_addr.0 - layout::MEMMAP_START.0;
         let len = len - (len % 16) + 16;
-        sev.launch_update_data(addr, len.try_into().unwrap()).unwrap()
+        sev.launch_update_data(addr, len.try_into().unwrap())
+            .unwrap()
     }
 
     // The hvm_start_info struct itself must be stored at PVH_START_INFO
@@ -1005,6 +1038,11 @@ fn configure_pvh(
     guest_mem
         .checked_offset(start_info_addr, mem::size_of::<hvm_start_info>())
         .ok_or(super::Error::StartInfoPastRamEnd)?;
+
+    #[cfg(feature = "sev")]
+    if kernel_len > 0 {
+        start_info.0.reserved = kernel_len;
+    }
 
     // Write the start_info struct to guest memory.
     guest_mem
@@ -1219,7 +1257,10 @@ mod tests {
             Some(layout::RSDP_POINTER),
             None,
             None,
-            #[cfg(feature = "sev")] &mut None,
+            #[cfg(feature = "sev")]
+            &mut None,
+            #[cfg(feature = "sev")]
+            0,
         );
         assert!(config_err.is_err());
 
@@ -1233,7 +1274,20 @@ mod tests {
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
 
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")]&mut None).unwrap();
+        configure_system(
+            &gm,
+            GuestAddress(0),
+            &None,
+            no_vcpus,
+            None,
+            None,
+            None,
+            #[cfg(feature = "sev")]
+            &mut None,
+            #[cfg(feature = "sev")]
+            0,
+        )
+        .unwrap();
 
         // Now assigning some memory that is equal to the start of the 32bit memory hole.
         let mem_size = 3328 << 20;
@@ -1244,9 +1298,35 @@ mod tests {
             .map(|r| (r.0, r.1))
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")] &mut None).unwrap();
+        configure_system(
+            &gm,
+            GuestAddress(0),
+            &None,
+            no_vcpus,
+            None,
+            None,
+            None,
+            #[cfg(feature = "sev")]
+            &mut None,
+            #[cfg(feature = "sev")]
+            0,
+        )
+        .unwrap();
 
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")] &mut None).unwrap();
+        configure_system(
+            &gm,
+            GuestAddress(0),
+            &None,
+            no_vcpus,
+            None,
+            None,
+            None,
+            #[cfg(feature = "sev")]
+            &mut None,
+            #[cfg(feature = "sev")]
+            0,
+        )
+        .unwrap();
 
         // Now assigning some memory that falls after the 32bit memory hole.
         let mem_size = 3330 << 20;
@@ -1257,9 +1337,35 @@ mod tests {
             .map(|r| (r.0, r.1))
             .collect();
         let gm = GuestMemoryMmap::from_ranges(&ram_regions).unwrap();
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")] &mut None).unwrap();
+        configure_system(
+            &gm,
+            GuestAddress(0),
+            &None,
+            no_vcpus,
+            None,
+            None,
+            None,
+            #[cfg(feature = "sev")]
+            &mut None,
+            #[cfg(feature = "sev")]
+            0,
+        )
+        .unwrap();
 
-        configure_system(&gm, GuestAddress(0), &None, no_vcpus, None, None, None,#[cfg(feature = "sev")] &mut None).unwrap();
+        configure_system(
+            &gm,
+            GuestAddress(0),
+            &None,
+            no_vcpus,
+            None,
+            None,
+            None,
+            #[cfg(feature = "sev")]
+            &mut None,
+            #[cfg(feature = "sev")]
+            0,
+        )
+        .unwrap();
     }
 
     #[test]

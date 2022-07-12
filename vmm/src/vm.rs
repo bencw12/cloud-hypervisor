@@ -45,6 +45,8 @@ use arch::x86_64::tdx::TdvfSection;
 use arch::EntryPoint;
 #[cfg(target_arch = "aarch64")]
 use arch::PciSpaceInfo;
+#[cfg(feature = "sev")]
+use arch::CMDLINE_START;
 use arch::{NumaNode, NumaNodes};
 #[cfg(target_arch = "aarch64")]
 use devices::gic::GIC_V3_ITS_SNAPSHOT_ID;
@@ -54,7 +56,7 @@ use devices::AcpiNotificationFlags;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
 #[cfg(feature = "sev")]
-use hypervisor::sev::Sev;
+use hypervisor::sev::{Sev, FIRMWARE_ADDR};
 use hypervisor::{HypervisorVmError, VmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(feature = "guest_debug")]
@@ -95,6 +97,8 @@ use vm_device::Bus;
 use vm_device::BusDevice;
 #[cfg(target_arch = "x86_64")]
 use vm_memory::Address;
+#[cfg(feature = "sev")]
+use vm_memory::GuestMemory;
 #[cfg(feature = "tdx")]
 use vm_memory::{ByteValued, GuestMemory, GuestMemoryRegion};
 use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic};
@@ -256,6 +260,14 @@ pub enum Error {
 
     #[error("Failed to copy firmware to memory: {0}")]
     FirmwareLoad(#[source] vm_memory::GuestMemoryError),
+
+    #[cfg(feature = "sev")]
+    #[error("No kernel provided for SEV")]
+    SevMissingKernel,
+
+    #[cfg(feature = "sev")]
+    #[error("Error loading SEV firmware")]
+    SevFirmwareLoad(#[source] std::io::Error),
 
     #[cfg(feature = "tdx")]
     #[error("Error performing I/O on TDX firmware file: {0}")]
@@ -515,7 +527,7 @@ impl Vm {
         #[cfg(feature = "sev")]
         let mut sev = None;
         #[cfg(feature = "sev")]
-        if config.lock().unwrap().sev {
+        if config.lock().unwrap().sev.is_some() {
             let mut sev_dev = Sev::new(vm.fd().clone());
             sev_dev.sev_init().unwrap();
             sev = Some(sev_dev);
@@ -525,7 +537,13 @@ impl Vm {
 
         #[cfg(target_arch = "x86_64")]
         let load_kernel_handle = if !restoring {
-            Self::load_kernel_async(&kernel, &memory_manager, &config, #[cfg(feature = "sev")] &sev_mutex)?
+            Self::load_kernel_async(
+                &kernel,
+                &memory_manager,
+                &config,
+                #[cfg(feature = "sev")]
+                &sev_mutex,
+            )?
         } else {
             None
         };
@@ -544,7 +562,9 @@ impl Vm {
 
         #[cfg(feature = "tdx")]
         let force_iommu = config.lock().unwrap().tdx.is_some();
-        #[cfg(not(feature = "tdx"))]
+        #[cfg(feature = "sev")]
+        let force_iommu = config.lock().unwrap().sev.is_some();
+        #[cfg(not(any(feature = "tdx", feature = "sev")))]
         let force_iommu = false;
 
         #[cfg(feature = "gdb")]
@@ -1014,11 +1034,8 @@ impl Vm {
         mut kernel: File,
         cmdline: Cmdline,
         memory_manager: Arc<Mutex<MemoryManager>>,
-        #[cfg(feature = "sev")] sev: Arc<Mutex<Option<Sev>>>,
     ) -> Result<EntryPoint> {
         use linux_loader::loader::{elf::Error::InvalidElfMagicNumber, Error::Elf};
-        #[cfg(feature = "sev")]
-        use vm_memory::GuestMemory;
 
         info!("Loading kernel");
 
@@ -1032,18 +1049,7 @@ impl Vm {
             &mut kernel,
             Some(arch::layout::HIGH_RAM_START),
         ) {
-            Ok(entry_addr) => {
-                #[cfg(feature = "sev")]
-                if sev.lock().unwrap().is_some() {
-                    //Workaround to not have to modify linux_loader
-                    //Both OVMF and rust-hypervisor-firmware loaded at 0x100000
-                    let addr = mem.deref().get_host_address(GuestAddress(0x100000)).unwrap() as u64;
-                    let size = entry_addr.kernel_end - (entry_addr.kernel_end % 16) + 16;
-                    let size = size - 0x100000;
-                    sev.lock().unwrap().as_mut().unwrap().launch_update_data(addr, size.try_into().unwrap()).unwrap()
-                }
-                entry_addr
-            },
+            Ok(entry_addr) => entry_addr,
             Err(e) => match e {
                 Elf(InvalidElfMagicNumber) => {
                     // Not an ELF header - assume raw binary data / firmware
@@ -1092,6 +1098,7 @@ impl Vm {
 
         linux_loader::loader::load_cmdline(mem.deref(), arch::layout::CMDLINE_START, &cmdline)
             .map_err(Error::LoadCmdLine)?;
+        println!("Load cmdline");
 
         if let PvhEntryPresent(entry_addr) = entry_addr.pvh_boot_cap {
             // Use the PVH kernel entry point to boot the guest
@@ -1116,6 +1123,11 @@ impl Vm {
         if config.lock().unwrap().tdx.is_some() {
             return Ok(None);
         }
+        // If using SEV load kernel differently
+        #[cfg(feature = "sev")]
+        if sev.lock().unwrap().as_mut().is_some() {
+            return Ok(None);
+        }
 
         kernel
             .as_ref()
@@ -1123,14 +1135,12 @@ impl Vm {
                 let kernel = kernel.try_clone().unwrap();
                 let config = config.clone();
                 let memory_manager = memory_manager.clone();
-                #[cfg(feature = "sev")]
-                let sev = sev.clone();
 
                 std::thread::Builder::new()
                     .name("kernel_loader".into())
                     .spawn(move || {
                         let cmdline = Self::generate_cmdline(&config)?;
-                        Self::load_kernel(kernel, cmdline, memory_manager, #[cfg(feature = "sev")] sev)
+                        Self::load_kernel(kernel, cmdline, memory_manager)
                     })
                     .map_err(Error::KernelLoadThreadSpawn)
             })
@@ -1138,7 +1148,11 @@ impl Vm {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn configure_system(&mut self, rsdp_addr: GuestAddress) -> Result<()> {
+    fn configure_system(
+        &mut self,
+        rsdp_addr: GuestAddress,
+        #[cfg(feature = "sev")] kernel_len: u32,
+    ) -> Result<()> {
         info!("Configuring system");
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
 
@@ -1175,6 +1189,8 @@ impl Vm {
             serial_number.as_deref(),
             #[cfg(feature = "sev")]
             &mut self.sev.lock().unwrap(),
+            #[cfg(feature = "sev")]
+            kernel_len,
         )
         .map_err(Error::ConfigureSystem)?;
         Ok(())
@@ -1756,6 +1772,26 @@ impl Vm {
         Ok(())
     }
 
+    #[cfg(feature = "sev")]
+    fn setup_sev(&mut self) -> Result<u32> {
+        if let Some(sev) = self.sev.lock().unwrap().as_mut() {
+            let config = self.config.lock().unwrap();
+            let kernel_path = config.kernel.as_ref();
+            let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
+            let firmware_path = &config.sev.as_ref().unwrap().firmware;
+            sev.load_firmware(mem.deref(), firmware_path).unwrap();
+            match kernel_path {
+                Some(config) => {
+                    let len = sev.load_kernel(mem.deref(), &config.path).unwrap();
+                    return Ok(len);
+                }
+                None => return Err(Error::SevMissingKernel),
+            }
+        }
+
+        Ok(0)
+    }
+
     #[cfg(feature = "tdx")]
     fn extract_tdvf_sections(&mut self) -> Result<Vec<TdvfSection>> {
         use arch::x86_64::tdx::*;
@@ -2101,11 +2137,26 @@ impl Vm {
         );
         info!("Created ACPI tables: rsdp_addr = 0x{:x}", rsdp_addr.0);
 
+        // if let Some(sev) = self.sev.lock().unwrap().as_mut() {
+        //     let addr = mem.get_host_address(rsdp_addr).unwrap() as u64;
+        //     let addr = addr - (addr % 16);
+        //     let len = Rsdp::len();
+        //     println!("calculated len 0x{:x}", len);
+        //     // let len = len - (len % 16) + 16;
+        //     sev.launch_update_data(addr, len as u32).unwrap();
+        // }
+
         Some(rsdp_addr)
     }
 
     #[cfg(target_arch = "x86_64")]
     fn entry_point(&mut self) -> Result<Option<EntryPoint>> {
+        #[cfg(feature = "sev")]
+        if self.config.lock().unwrap().sev.is_some() {
+            return Ok(Some(EntryPoint {
+                entry_addr: Some(GuestAddress(FIRMWARE_ADDR)),
+            }));
+        }
         self.load_kernel_handle
             .take()
             .map(|handle| handle.join().map_err(Error::KernelLoadThreadJoin)?)
@@ -2147,6 +2198,13 @@ impl Vm {
         // finish.
         let entry_point = self.entry_point()?;
 
+        #[cfg(feature = "sev")]
+        let mut kernel_len = 0u32;
+        #[cfg(feature = "sev")]
+        if self.sev.lock().unwrap().is_some() {
+            kernel_len = self.setup_sev()?;
+        }
+
         // The initial TDX configuration must be done before the vCPUs are
         // created
         #[cfg(feature = "tdx")]
@@ -2187,14 +2245,47 @@ impl Vm {
             .map(|_| {
                 // Safe to unwrap rsdp_addr as we know it can't be None when
                 // the entry_point is Some.
-                self.configure_system(rsdp_addr.unwrap())
+                self.configure_system(
+                    rsdp_addr.unwrap(),
+                    #[cfg(feature = "sev")]
+                    kernel_len,
+                )
             })
             .transpose()?;
-        
+
         #[cfg(all(feature = "sev", target_arch = "x86_64"))]
         if self.sev.lock().unwrap().is_some() {
-            self.sev.lock().unwrap().as_mut().unwrap().get_launch_measurement().unwrap();
-            self.sev.lock().unwrap().as_mut().unwrap().sev_launch_finish().unwrap();
+            let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
+            let mut cmdline = Self::generate_cmdline(&self.config).unwrap();
+            cmdline.insert_str("acpi=off").unwrap();
+            println!("{}", cmdline.as_str());
+
+            linux_loader::loader::load_cmdline(mem.deref(), CMDLINE_START, &cmdline).unwrap();
+            let addr = mem.get_host_address(CMDLINE_START).unwrap() as u64;
+            let addr = addr - (addr % 16);
+            let len = cmdline.as_str().len();
+            let len = len - (len % 16) + 16;
+            self.sev
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .launch_update_data(addr, len as u32)
+                .unwrap();
+            self.sev
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .get_launch_measurement()
+                .unwrap();
+            self.sev
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .sev_launch_finish()
+                .unwrap();
         }
 
         #[cfg(feature = "tdx")]

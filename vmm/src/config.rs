@@ -101,6 +101,12 @@ pub enum Error {
     #[cfg(feature = "tdx")]
     /// No TDX firmware
     FirmwarePathMissing,
+    #[cfg(feature = "sev")]
+    /// Failed parsing SEV config
+    ParseSev(OptionParserError),
+    #[cfg(feature = "sev")]
+    /// No SEV firmware
+    FirmwarePathMissing,
     /// Failed parsing userspace device
     ParseUserDevice(OptionParserError),
     /// Missing socket for userspace device
@@ -322,6 +328,10 @@ impl fmt::Display for Error {
             ParsePlatform(o) => write!(f, "Error parsing --platform: {}", o),
             ParseVdpa(o) => write!(f, "Error parsing --vdpa: {}", o),
             ParseVdpaPathMissing => write!(f, "Error parsing --vdpa: path missing"),
+            #[cfg(feature = "sev")]
+            ParseSev(o) => write!(f, "Error parsing --sev: {}", o),
+            #[cfg(feature = "sev")]
+            FirmwarePathMissing => write!(f, "SEV firmware missing"),
         }
     }
 }
@@ -357,8 +367,8 @@ pub struct VmParams<'a> {
     pub vsock: Option<&'a str>,
     #[cfg(target_arch = "x86_64")]
     pub sgx_epc: Option<Vec<&'a str>>,
-    #[cfg(target_arch = "x86_64")]
-    pub sev: bool,
+    #[cfg(feature = "sev")]
+    pub sev: Option<&'a str>,
     pub numa: Option<Vec<&'a str>>,
     pub watchdog: bool,
     #[cfg(feature = "tdx")]
@@ -393,8 +403,6 @@ impl<'a> VmParams<'a> {
         let vsock: Option<&str> = args.value_of("vsock");
         #[cfg(target_arch = "x86_64")]
         let sgx_epc: Option<Vec<&str>> = args.values_of("sgx-epc").map(|x| x.collect());
-        #[cfg(target_arch = "x86_64")]
-        let sev: bool = args.is_present("sev");
         let numa: Option<Vec<&str>> = args.values_of("numa").map(|x| x.collect());
         let watchdog = args.is_present("watchdog");
         let platform = args.value_of("platform");
@@ -402,6 +410,8 @@ impl<'a> VmParams<'a> {
         let tdx = args.value_of("tdx");
         #[cfg(feature = "gdb")]
         let gdb = args.is_present("gdb");
+        #[cfg(feature = "sev")]
+        let sev = args.value_of("sev");
         VmParams {
             cpus,
             memory,
@@ -423,7 +433,7 @@ impl<'a> VmParams<'a> {
             vsock,
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(feature = "sev")]
             sev,
             numa,
             watchdog,
@@ -2108,6 +2118,26 @@ impl TdxConfig {
     }
 }
 
+#[cfg(feature = "sev")]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
+pub struct SevConfig {
+    pub firmware: PathBuf,
+}
+
+#[cfg(feature = "sev")]
+impl SevConfig {
+    pub fn parse(sev: &str) -> Result<Self> {
+        let mut parser = OptionParser::new();
+        parser.add("firmware");
+        parser.parse(sev).map_err(Error::ParseSev)?;
+        let firmware = parser
+            .get("firmware")
+            .map(PathBuf::from)
+            .ok_or(Error::FirmwarePathMissing)?;
+        Ok(SevConfig { firmware })
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
 pub struct SgxEpcConfig {
@@ -2292,8 +2322,8 @@ pub struct VmConfig {
     #[cfg(feature = "gdb")]
     pub gdb: bool,
     pub platform: Option<PlatformConfig>,
-    #[cfg(target_arch = "x86_64")]
-    pub sev: bool,
+    #[cfg(feature = "sev")]
+    pub sev: Option<SevConfig>,
 }
 
 impl VmConfig {
@@ -2635,16 +2665,6 @@ impl VmConfig {
             }
         }
 
-        #[cfg(target_arch = "x86_64")]
-        let mut sev = false;
-        #[cfg(target_arch = "x86_64")]
-        {
-            if vm_params.sev {
-                //initialize sev
-                sev = true;
-            }
-        }
-
         let mut numa: Option<Vec<NumaConfig>> = None;
         if let Some(numa_list) = &vm_params.numa {
             let mut numa_config_list = Vec::new();
@@ -2672,6 +2692,9 @@ impl VmConfig {
         #[cfg(feature = "tdx")]
         let tdx = vm_params.tdx.map(TdxConfig::parse).transpose()?;
 
+        #[cfg(feature = "sev")]
+        let sev = vm_params.sev.map(SevConfig::parse).transpose()?;
+
         #[cfg(feature = "gdb")]
         let gdb = vm_params.gdb;
 
@@ -2696,7 +2719,7 @@ impl VmConfig {
             iommu: false, // updated in VmConfig::validate()
             #[cfg(target_arch = "x86_64")]
             sgx_epc,
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(feature = "sev")]
             sev,
             numa,
             watchdog: vm_params.watchdog,
@@ -3319,8 +3342,8 @@ mod tests {
             iommu: false,
             #[cfg(target_arch = "x86_64")]
             sgx_epc: None,
-            #[cfg(target_arch = "x86_64")]
-            sev: false,
+            #[cfg(feature = "sev")]
+            sev: None,
             numa: None,
             watchdog: false,
             #[cfg(feature = "tdx")]

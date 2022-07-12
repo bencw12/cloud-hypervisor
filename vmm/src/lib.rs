@@ -1940,8 +1940,8 @@ mod unit_tests {
             iommu: false,
             #[cfg(target_arch = "x86_64")]
             sgx_epc: None,
-            #[cfg(target_arch = "x86_64")]
-            sev: false,
+            #[cfg(feature = "sev")]
+            sev: None,
             numa: None,
             watchdog: false,
             #[cfg(feature = "tdx")]

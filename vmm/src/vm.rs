@@ -2258,7 +2258,6 @@ impl Vm {
             let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
             let mut cmdline = Self::generate_cmdline(&self.config).unwrap();
             cmdline.insert_str("acpi=off").unwrap();
-            println!("{}", cmdline.as_str());
 
             linux_loader::loader::load_cmdline(mem.deref(), CMDLINE_START, &cmdline).unwrap();
             let addr = mem.get_host_address(CMDLINE_START).unwrap() as u64;

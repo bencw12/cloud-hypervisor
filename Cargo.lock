@@ -348,6 +348,7 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
+ "linux-loader",
  "log",
  "mshv-bindings",
  "mshv-ioctls",

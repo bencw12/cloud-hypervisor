@@ -56,7 +56,7 @@ use devices::AcpiNotificationFlags;
 #[cfg(all(target_arch = "x86_64", feature = "gdb"))]
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
 #[cfg(feature = "sev")]
-use hypervisor::sev::{Sev, FIRMWARE_ADDR};
+use hypervisor::sev::Sev;
 use hypervisor::{HypervisorVmError, VmOps};
 use linux_loader::cmdline::Cmdline;
 #[cfg(feature = "guest_debug")]
@@ -1779,13 +1779,16 @@ impl Vm {
             let kernel_path = config.kernel.as_ref();
             let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
             let firmware_path = &config.sev.as_ref().unwrap().firmware;
-            sev.load_firmware(mem.deref(), firmware_path).unwrap();
-            match kernel_path {
-                Some(config) => {
-                    let len = sev.load_kernel(mem.deref(), &config.path).unwrap();
-                    return Ok(len);
+            let need_kernel = sev.load_firmware(mem.deref(), firmware_path).unwrap();
+            //Only load the kernel if not using ovmf
+            if need_kernel {
+                match kernel_path {
+                    Some(config) => {
+                        let len = sev.load_kernel(mem.deref(), &config.path).unwrap();
+                        return Ok(len);
+                    }
+                    None => return Err(Error::SevMissingKernel),
                 }
-                None => return Err(Error::SevMissingKernel),
             }
         }
 
@@ -2152,9 +2155,9 @@ impl Vm {
     #[cfg(target_arch = "x86_64")]
     fn entry_point(&mut self) -> Result<Option<EntryPoint>> {
         #[cfg(feature = "sev")]
-        if self.config.lock().unwrap().sev.is_some() {
+        if let Some(sev) = self.sev.lock().unwrap().as_mut() {
             return Ok(Some(EntryPoint {
-                entry_addr: Some(GuestAddress(FIRMWARE_ADDR)),
+                entry_addr: Some(sev.entry_point()),
             }));
         }
         self.load_kernel_handle
@@ -2194,16 +2197,16 @@ impl Vm {
         self.setup_signal_handler()?;
         self.setup_tty()?;
 
-        // Load kernel synchronously or if asynchronous then wait for load to
-        // finish.
-        let entry_point = self.entry_point()?;
-
         #[cfg(feature = "sev")]
         let mut kernel_len = 0u32;
         #[cfg(feature = "sev")]
         if self.sev.lock().unwrap().is_some() {
             kernel_len = self.setup_sev()?;
         }
+
+        // Load kernel synchronously or if asynchronous then wait for load to
+        // finish.
+        let entry_point = self.entry_point()?;
 
         // The initial TDX configuration must be done before the vCPUs are
         // created

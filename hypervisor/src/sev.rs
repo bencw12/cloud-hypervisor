@@ -11,6 +11,7 @@ use kvm_bindings::{
     sev_cmd_id_KVM_SEV_LAUNCH_MEASURE,
 };
 use kvm_ioctls::VmFd;
+use linux_loader::loader::KernelLoader;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::Seek;
@@ -23,7 +24,7 @@ use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
 const MEASUREMENT_LEN: u32 = 48;
-pub const FIRMWARE_ADDR: u64 = 0x100000;
+const FIRMWARE_ADDR: GuestAddress = GuestAddress(0x100000);
 const KERNEL_ADDR: u64 = 0x2000000;
 
 //This excludes SUCCESS=0 and ACTIVE=18
@@ -66,6 +67,10 @@ pub enum SevError {
     /// The error code returned by the SEV device is not valid
     InvalidErrorCode,
     Errno(i32),
+}
+#[derive(Debug)]
+pub enum Error {
+    FirmwareLoad,
 }
 
 impl Display for SevError {
@@ -129,6 +134,7 @@ pub struct Sev {
     state: State,
     measure: Vec<u8>,
     _cbitpos: u32,
+    entry_point: GuestAddress,
 }
 
 impl Sev {
@@ -155,6 +161,7 @@ impl Sev {
             state: State::UnInit,
             measure: Vec::with_capacity(48),
             _cbitpos: ebx,
+            entry_point: GuestAddress(0)
         }
     }
 
@@ -178,20 +185,50 @@ impl Sev {
         &mut self,
         mem: &M,
         firmware_path: &PathBuf,
-    ) -> SevResult<()> {
+    ) -> Result<bool, Error> {
+        use linux_loader::loader::{elf::Error::InvalidElfMagicNumber, Error::Elf};
         let mut f = File::open(firmware_path.as_path()).unwrap();
         f.seek(SeekFrom::Start(0)).unwrap();
         let len = f.seek(SeekFrom::End(0)).unwrap();
         f.seek(SeekFrom::Start(0)).unwrap();
 
-        mem.read_exact_from(GuestAddress(FIRMWARE_ADDR), &mut f, len.try_into().unwrap())
-            .unwrap();
+        //Check if firmware is pvh elf
+        match linux_loader::loader::elf::Elf::load(
+            mem, 
+            None, 
+            &mut f, 
+            Some(GuestAddress(0x100000)),
+        ) {
+            Ok(entry_addr) => {
+                //Need to encrypt ovmf here
+                let addr = mem.get_host_address(FIRMWARE_ADDR).unwrap() as u64;
+                let len = entry_addr.kernel_end - FIRMWARE_ADDR.0;
+                let len = len - (len % 16) + 16;
+                self.launch_update_data(addr, len as u32).unwrap();
+                self.entry_point = entry_addr.kernel_load;
+                entry_addr
+            },
+            Err(e) => match e {
+                Elf(InvalidElfMagicNumber) => {
+                    f.seek(SeekFrom::Start(0)).unwrap();
+                    //If not an elf try flat binary firmware
+                    mem.read_exact_from(FIRMWARE_ADDR, &mut f, len.try_into().unwrap())
+                        .unwrap();
 
-        let addr = mem.get_host_address(GuestAddress(FIRMWARE_ADDR)).unwrap() as u64;
-        let len = len - (len % 16) + 16;
-        self.launch_update_data(addr, len as u32).unwrap();
+                    let addr = mem.get_host_address(FIRMWARE_ADDR).unwrap() as u64;
+                    let len = len - (len % 16) + 16;
+                    self.launch_update_data(addr, len as u32).unwrap();
+                    self.entry_point = FIRMWARE_ADDR;
+                    //also need a kernel if we loaded sev-fw
+                    return Ok(true);
+                }
+                _ => {
+                    return Err(Error::FirmwareLoad);
+                }
+            },
+        };
 
-        Ok(())
+        Ok(false)
     }
 
     fn sev_ioctl(&mut self, cmd: &mut kvm_sev_cmd) -> SevResult<()> {
@@ -205,6 +242,10 @@ impl Sev {
             }
             _ => Ok(()),
         }
+    }
+
+    pub fn entry_point(&self) -> GuestAddress {
+        self.entry_point
     }
 
     pub fn sev_init(&mut self) -> SevResult<()> {

@@ -1098,7 +1098,6 @@ impl Vm {
 
         linux_loader::loader::load_cmdline(mem.deref(), arch::layout::CMDLINE_START, &cmdline)
             .map_err(Error::LoadCmdLine)?;
-        println!("Load cmdline");
 
         if let PvhEntryPresent(entry_addr) = entry_addr.pvh_boot_cap {
             // Use the PVH kernel entry point to boot the guest

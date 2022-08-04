@@ -107,6 +107,9 @@ pub enum Error {
     #[cfg(feature = "sev")]
     /// No SEV firmware
     FirmwarePathMissing,
+    #[cfg(feature = "sev")]
+    /// Bad encryption status
+    ParseEncryptionStatus,
     /// Failed parsing userspace device
     ParseUserDevice(OptionParserError),
     /// Missing socket for userspace device
@@ -332,6 +335,8 @@ impl fmt::Display for Error {
             ParseSev(o) => write!(f, "Error parsing --sev: {}", o),
             #[cfg(feature = "sev")]
             FirmwarePathMissing => write!(f, "SEV firmware missing"),
+            #[cfg(feature = "sev")]
+            ParseEncryptionStatus => write!(f, "Invalid encryption status"),
         }
     }
 }
@@ -2122,6 +2127,7 @@ impl TdxConfig {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, Default)]
 pub struct SevConfig {
     pub firmware: PathBuf,
+    pub encryption: bool,
 }
 
 #[cfg(feature = "sev")]
@@ -2129,12 +2135,20 @@ impl SevConfig {
     pub fn parse(sev: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("firmware");
+        parser.add("encryption");
         parser.parse(sev).map_err(Error::ParseSev)?;
         let firmware = parser
             .get("firmware")
             .map(PathBuf::from)
             .ok_or(Error::FirmwarePathMissing)?;
-        Ok(SevConfig { firmware })
+        let encryption = match parser.get("encryption") {
+            Some(_s) => true,
+            _ => false,
+        };
+
+        println!("{}", encryption);
+        
+        Ok(SevConfig { firmware, encryption })
     }
 }
 

@@ -528,8 +528,10 @@ impl Vm {
         let mut sev = None;
         #[cfg(feature = "sev")]
         if config.lock().unwrap().sev.is_some() {
-            let mut sev_dev = Sev::new(vm.fd().clone());
-            sev_dev.sev_init().unwrap();
+            let mut sev_dev = Sev::new(vm.fd().clone(), config.lock().unwrap().sev.as_ref().unwrap().encryption);
+            if config.lock().unwrap().sev.as_ref().unwrap().encryption {
+                sev_dev.sev_init().unwrap();
+            }
             sev = Some(sev_dev);
         }
         #[cfg(feature = "sev")]

@@ -135,10 +135,11 @@ pub struct Sev {
     measure: Vec<u8>,
     _cbitpos: u32,
     entry_point: GuestAddress,
+    encryption: bool,
 }
 
 impl Sev {
-    pub fn new(vm_fd: Arc<VmFd>) -> Sev {
+    pub fn new(vm_fd: Arc<VmFd>, encryption: bool) -> Sev {
         //Open /dev/sev
         let fd = OpenOptions::new()
             .read(true)
@@ -161,7 +162,8 @@ impl Sev {
             state: State::UnInit,
             measure: Vec::with_capacity(48),
             _cbitpos: ebx,
-            entry_point: GuestAddress(0)
+            entry_point: GuestAddress(0),
+            encryption
         }
     }
 
@@ -214,7 +216,6 @@ impl Sev {
                     //If not an elf try flat binary firmware
                     mem.read_exact_from(FIRMWARE_ADDR, &mut f, len.try_into().unwrap())
                         .unwrap();
-
                     let addr = mem.get_host_address(FIRMWARE_ADDR).unwrap() as u64;
                     let len = len - (len % 16) + 16;
                     self.launch_update_data(addr, len as u32).unwrap();
@@ -293,6 +294,11 @@ impl Sev {
     }
 
     pub fn launch_update_data(&mut self, addr: u64, len: u32) -> SevResult<()> {
+        if !self.encryption {
+            return Ok(())
+        }
+
+
         if self.state != State::LaunchUpdate {
             return Err(SevError::InvalidPlatformState);
         }
@@ -326,6 +332,9 @@ impl Sev {
     }
 
     pub fn get_launch_measurement(&mut self) -> SevResult<()> {
+        if !self.encryption {
+            return Ok(());
+        }
         if self.state != State::LaunchUpdate {
             return Err(SevError::InvalidPlatformState);
         }
@@ -390,6 +399,9 @@ impl Sev {
     }
 
     pub fn sev_launch_finish(&mut self) -> SevResult<()> {
+        if !self.encryption {
+            return Ok(());
+        }
         if self.state != State::LaunchSecret {
             return Err(SevError::InvalidPlatformState);
         }

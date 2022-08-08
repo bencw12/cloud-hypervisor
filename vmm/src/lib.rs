@@ -596,6 +596,12 @@ impl Vmm {
                 return Err(VmError::VmNotCreated);
             };
 
+        #[cfg(feature="sev")]
+        if config.lock().unwrap().sev.is_some() {
+            self.vm_delete()?;
+            return Ok(());
+        }
+
         let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
         let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
         #[cfg(feature = "gdb")]

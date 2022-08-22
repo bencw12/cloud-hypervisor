@@ -206,7 +206,13 @@ impl Sev {
                 let addr = mem.get_host_address(FIRMWARE_ADDR).unwrap() as u64;
                 let len = entry_addr.kernel_end - FIRMWARE_ADDR.0;
                 let len = len - (len % 16) + 16;
+                
+                info!("Pre-encrypting firmware");
+
                 self.launch_update_data(addr, len as u32).unwrap();
+
+                info!("Pre-encryption done");
+
                 self.entry_point = entry_addr.kernel_load;
                 entry_addr
             },

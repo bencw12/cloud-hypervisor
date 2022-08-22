@@ -224,7 +224,12 @@ impl Sev {
                         .unwrap();
                     let addr = mem.get_host_address(FIRMWARE_ADDR).unwrap() as u64;
                     let len = len - (len % 16) + 16;
+                    info!("Pre-encrypting firmware");
+
                     self.launch_update_data(addr, len as u32).unwrap();
+
+                    info!("Pre-encryption done");
+                    
                     self.entry_point = FIRMWARE_ADDR;
                     //also need a kernel if we loaded sev-fw
                     return Ok(true);

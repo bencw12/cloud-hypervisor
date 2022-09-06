@@ -847,7 +847,6 @@ pub fn configure_system(
     sgx_epc_region: Option<SgxEpcRegion>,
     serial_number: Option<&str>,
     #[cfg(feature = "sev")] sev: &mut Option<Sev>,
-    #[cfg(feature = "sev")] kernel_len: u32,
 ) -> super::Result<()> {
     // Write EBDA address to location where ACPICA expects to find it
     guest_mem
@@ -900,8 +899,6 @@ pub fn configure_system(
         sgx_epc_region,
         #[cfg(feature = "sev")]
         sev,
-        #[cfg(feature = "sev")]
-        kernel_len,
     )
 }
 
@@ -912,7 +909,6 @@ fn configure_pvh(
     rsdp_addr: Option<GuestAddress>,
     sgx_epc_region: Option<SgxEpcRegion>,
     #[cfg(feature = "sev")] sev: &mut Option<Sev>,
-    #[cfg(feature = "sev")] kernel_len: u32,
 ) -> super::Result<()> {
     const XEN_HVM_START_MAGIC_VALUE: u32 = 0x336ec578;
 
@@ -1025,7 +1021,6 @@ fn configure_pvh(
     if let Some(sev) = sev {
         let addr = guest_mem.get_host_address(layout::MEMMAP_START).unwrap() as u64;
         let len = memmap_start_addr.0 - layout::MEMMAP_START.0;
-        let len = len - (len % 16) + 16;
         sev.launch_update_data(addr, len.try_into().unwrap())
             .unwrap()
     }
@@ -1040,9 +1035,13 @@ fn configure_pvh(
         .ok_or(super::Error::StartInfoPastRamEnd)?;
 
     #[cfg(feature = "sev")]
-    if kernel_len > 0 {
-        start_info.0.reserved = kernel_len;
+    if sev.is_some() {
+        let kernel_len = sev.as_ref().unwrap().kernel_len();
+        if kernel_len > 0 {
+            start_info.0.reserved = kernel_len;
+        }
     }
+    
 
     // Write the start_info struct to guest memory.
     guest_mem
@@ -1053,7 +1052,6 @@ fn configure_pvh(
     if let Some(sev) = sev {
         let addr = guest_mem.get_host_address(layout::PVH_INFO_START).unwrap() as u64;
         let len = mem::size_of::<hvm_start_info>() as u32;
-        let len = len - (len % 16) + 16;
         sev.launch_update_data(addr, len).unwrap();
     }
 
@@ -1259,8 +1257,6 @@ mod tests {
             None,
             #[cfg(feature = "sev")]
             &mut None,
-            #[cfg(feature = "sev")]
-            0,
         );
         assert!(config_err.is_err());
 
@@ -1284,8 +1280,6 @@ mod tests {
             None,
             #[cfg(feature = "sev")]
             &mut None,
-            #[cfg(feature = "sev")]
-            0,
         )
         .unwrap();
 
@@ -1308,8 +1302,6 @@ mod tests {
             None,
             #[cfg(feature = "sev")]
             &mut None,
-            #[cfg(feature = "sev")]
-            0,
         )
         .unwrap();
 
@@ -1323,8 +1315,6 @@ mod tests {
             None,
             #[cfg(feature = "sev")]
             &mut None,
-            #[cfg(feature = "sev")]
-            0,
         )
         .unwrap();
 
@@ -1347,8 +1337,6 @@ mod tests {
             None,
             #[cfg(feature = "sev")]
             &mut None,
-            #[cfg(feature = "sev")]
-            0,
         )
         .unwrap();
 
@@ -1362,8 +1350,6 @@ mod tests {
             None,
             #[cfg(feature = "sev")]
             &mut None,
-            #[cfg(feature = "sev")]
-            0,
         )
         .unwrap();
     }

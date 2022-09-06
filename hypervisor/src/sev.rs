@@ -24,8 +24,10 @@ use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
 const MEASUREMENT_LEN: u32 = 48;
-const FIRMWARE_ADDR: GuestAddress = GuestAddress(0x100000);
-const KERNEL_ADDR: u64 = 0x2000000;
+const FIRMWARE_ADDR: GuestAddress = GuestAddress(0x100000); //1M
+const KERNEL_ADDR: u64 = 0x4000000; // 64M
+//Disable debug
+const DEFAULT_POLICY: u32 = 1;
 
 //This excludes SUCCESS=0 and ACTIVE=18
 #[derive(Debug, Error)]
@@ -136,11 +138,17 @@ pub struct Sev {
     _cbitpos: u32,
     entry_point: GuestAddress,
     encryption: bool,
+    kernel_len: u32,
+    fw_start: u64,
+    fw_len: u32,
 }
 
 impl Sev {
     pub fn new(vm_fd: Arc<VmFd>, encryption: bool) -> Sev {
         //Open /dev/sev
+
+        info!("Creating SEV device: policy 0x{:x}", DEFAULT_POLICY);
+
         let fd = OpenOptions::new()
             .read(true)
             .write(true)
@@ -158,12 +166,15 @@ impl Sev {
             vm_fd,
             fd: fd,
             handle: 0,
-            policy: 0,
+            policy: DEFAULT_POLICY,
             state: State::UnInit,
             measure: Vec::with_capacity(48),
             _cbitpos: ebx,
             entry_point: GuestAddress(0),
-            encryption
+            encryption,
+            kernel_len: 0,
+            fw_start: 0,
+            fw_len: 0,
         }
     }
 
@@ -172,7 +183,7 @@ impl Sev {
         &mut self,
         mem: &M,
         kernel_path: &PathBuf,
-    ) -> SevResult<u32> {
+    ) -> SevResult<()> {
         let mut f = File::open(kernel_path.as_path()).unwrap();
         f.seek(SeekFrom::Start(0)).unwrap();
         let len = f.seek(SeekFrom::End(0)).unwrap();
@@ -180,7 +191,10 @@ impl Sev {
 
         mem.read_exact_from(GuestAddress(KERNEL_ADDR), &mut f, len.try_into().unwrap())
             .unwrap();
-        Ok(len as u32)
+
+        self.kernel_len = len as u32;
+
+        Ok(())
     }
     // Load the SEV firmware and encrypt
     pub fn load_firmware<M: GuestMemory>(
@@ -205,14 +219,9 @@ impl Sev {
                 //Need to encrypt ovmf here
                 let addr = mem.get_host_address(FIRMWARE_ADDR).unwrap() as u64;
                 let len = entry_addr.kernel_end - FIRMWARE_ADDR.0;
-                let len = len - (len % 16) + 16;
                 
-                info!("Pre-encrypting firmware");
-
-                self.launch_update_data(addr, len as u32).unwrap();
-
-                info!("Pre-encryption done");
-
+                self.fw_start = addr;
+                self.fw_len = len as u32;
                 self.entry_point = entry_addr.kernel_load;
                 entry_addr
             },
@@ -223,13 +232,11 @@ impl Sev {
                     mem.read_exact_from(FIRMWARE_ADDR, &mut f, len.try_into().unwrap())
                         .unwrap();
                     let addr = mem.get_host_address(FIRMWARE_ADDR).unwrap() as u64;
-                    let len = len - (len % 16) + 16;
-                    info!("Pre-encrypting firmware");
 
-                    self.launch_update_data(addr, len as u32).unwrap();
+                    // self.launch_update_data(addr, len as u32).unwrap();
 
-                    info!("Pre-encryption done");
-                    
+                    self.fw_start = addr;
+                    self.fw_len = len as u32;
                     self.entry_point = FIRMWARE_ADDR;
                     //also need a kernel if we loaded sev-fw
                     return Ok(true);
@@ -258,6 +265,10 @@ impl Sev {
 
     pub fn entry_point(&self) -> GuestAddress {
         self.entry_point
+    }
+
+    pub fn kernel_len(&self) -> u32 {
+        self.kernel_len
     }
 
     pub fn sev_init(&mut self) -> SevResult<()> {
@@ -304,11 +315,45 @@ impl Sev {
         Ok(())
     }
 
-    pub fn launch_update_data(&mut self, addr: u64, len: u32) -> SevResult<()> {
+    pub fn sev_ram_block_added(&mut self, addr: u64, len: u32) -> SevResult<()> {
         if !self.encryption {
             return Ok(())
         }
 
+        info!("SEV register encrypted region add 0x{:x} len 0x{:x}", addr, len);
+
+        let mem_region = kvm_enc_region {
+            addr: addr,
+            size: len as u64,
+        };
+
+        //Tell kvm this memory region might contain encrypted data
+        match self.vm_fd.register_enc_memory_region(&mem_region) {
+            Ok(()) => { info!("SEV registered encrypted memory region addr: 0x{:x} len: 0x{:x}", addr, len)}
+            Err(e) => return Err(SevError::Errno(e.errno())),
+        }
+
+        Ok(())
+    }
+
+    pub fn encrypt_firmware(&mut self) -> SevResult<()> {
+        self.launch_update_data(self.fw_start, self.fw_len)
+    }
+
+    pub fn launch_update_data(&mut self, mut addr: u64, mut len: u32) -> SevResult<()> {
+        if !self.encryption {
+            return Ok(())
+        }
+
+        //Align address and length to 16 
+        if addr % 16 != 0 {
+            addr -= addr % 16;
+            len += (addr % 16) as u32;
+        }
+
+        if len % 16 != 0 {
+            len = len - (len % 16) + 16;
+        }
 
         if self.state != State::LaunchUpdate {
             return Err(SevError::InvalidPlatformState);
@@ -319,17 +364,6 @@ impl Sev {
             len: len,
         };
 
-        let mem_region = kvm_enc_region {
-            addr: addr,
-            size: len as u64,
-        };
-
-        //Tell kvm this memory region might contain encrypted data
-        match self.vm_fd.register_enc_memory_region(&mem_region) {
-            Ok(()) => {}
-            Err(e) => return Err(SevError::Errno(e.errno())),
-        }
-
         let mut msg = kvm_sev_cmd {
             id: sev_cmd_id_KVM_SEV_LAUNCH_UPDATE_DATA,
             data: &region as *const kvm_sev_launch_update_data as _,
@@ -337,7 +371,12 @@ impl Sev {
             ..Default::default()
         };
 
+        info!("Pre-encrypting firmware addr 0x{:x} len 0x{:x}", addr, len);
+
         self.sev_ioctl(&mut msg).unwrap();
+
+        info!("Pre-encryption done");
+
 
         Ok(())
     }
@@ -352,7 +391,7 @@ impl Sev {
 
         let len = MEASUREMENT_LEN;
 
-        for _x in 0..len as usize {
+        for _ in 0..len as usize {
             self.measure.push(0);
         }
 

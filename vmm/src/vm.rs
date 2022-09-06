@@ -497,7 +497,7 @@ pub struct Vm {
     #[cfg(target_arch = "x86_64")]
     load_kernel_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
     #[cfg(all(feature = "sev", target_arch = "x86_64"))]
-    sev: Arc<Mutex<Option<Sev>>>,
+    sev: Option<Sev>,
 }
 
 impl Vm {
@@ -534,8 +534,8 @@ impl Vm {
             }
             sev = Some(sev_dev);
         }
-        #[cfg(feature = "sev")]
-        let sev_mutex = Arc::new(Mutex::new(sev));
+        // #[cfg(feature = "sev")]
+        // let sev_mutex = Arc::new(Mutex::new(sev));
 
         #[cfg(target_arch = "x86_64")]
         let load_kernel_handle = if !restoring {
@@ -544,7 +544,7 @@ impl Vm {
                 &memory_manager,
                 &config,
                 #[cfg(feature = "sev")]
-                &sev_mutex,
+                &mut sev,
             )?
         } else {
             None
@@ -640,6 +640,11 @@ impl Vm {
             .transpose()
             .map_err(Error::InitramfsFile)?;
 
+        #[cfg(feature = "sev")]
+        if let Some(sev) = sev.as_mut() {
+            sev.encrypt_firmware().unwrap();
+        }
+
         Ok(Vm {
             #[cfg(any(target_arch = "aarch64", feature = "tdx"))]
             kernel,
@@ -664,7 +669,7 @@ impl Vm {
             #[cfg(target_arch = "x86_64")]
             load_kernel_handle,
             #[cfg(all(feature = "sev", target_arch = "x86_64"))]
-            sev: sev_mutex,
+            sev: sev,
         })
     }
 
@@ -1117,7 +1122,7 @@ impl Vm {
         kernel: &Option<File>,
         memory_manager: &Arc<Mutex<MemoryManager>>,
         config: &Arc<Mutex<VmConfig>>,
-        #[cfg(feature = "sev")] sev: &Arc<Mutex<Option<Sev>>>,
+        #[cfg(feature = "sev")] sev: &mut Option<Sev>,
     ) -> Result<Option<thread::JoinHandle<Result<EntryPoint>>>> {
         // Kernel with TDX is loaded in a different manner
         #[cfg(feature = "tdx")]
@@ -1126,9 +1131,36 @@ impl Vm {
         }
         // If using SEV load kernel differently
         #[cfg(feature = "sev")]
-        if sev.lock().unwrap().as_mut().is_some() {
+        if sev.is_some() {
+            Self::setup_sev(sev.as_mut().unwrap(), &config, &memory_manager).unwrap();
             return Ok(None);
         }
+        // #[cfg(feature = "sev")]
+        // if sev.lock()
+        //     .unwrap()
+        //     .is_some() {
+            
+        //     let sev = sev.clone();
+        //     let config = config.clone();
+        //     let memory_manager = memory_manager.clone();
+
+        //     return Some(std::thread::Builder::new()
+        //         .name("sev_kernel_loader".into())
+        //         .spawn(move || {
+        //             #[cfg(feature = "sev")]
+        //             Self::setup_sev(&sev, &config, &memory_manager).unwrap();
+        //             return Ok(EntryPoint {
+        //                 entry_addr: 
+        //                     Some(sev
+        //                         .lock()
+        //                         .unwrap()
+        //                         .as_ref()
+        //                         .unwrap()
+        //                         .entry_point())
+        //             })
+        //         })
+        //         .map_err(Error::KernelLoadThreadSpawn)).transpose();
+        // }
 
         kernel
             .as_ref()
@@ -1152,7 +1184,6 @@ impl Vm {
     fn configure_system(
         &mut self,
         rsdp_addr: GuestAddress,
-        #[cfg(feature = "sev")] kernel_len: u32,
     ) -> Result<()> {
         info!("Configuring system");
         let mem = self.memory_manager.lock().unwrap().boot_guest_memory();
@@ -1189,9 +1220,7 @@ impl Vm {
             sgx_epc_region,
             serial_number.as_deref(),
             #[cfg(feature = "sev")]
-            &mut self.sev.lock().unwrap(),
-            #[cfg(feature = "sev")]
-            kernel_len,
+            &mut self.sev,
         )
         .map_err(Error::ConfigureSystem)?;
         Ok(())
@@ -1774,26 +1803,27 @@ impl Vm {
     }
 
     #[cfg(feature = "sev")]
-    fn setup_sev(&mut self) -> Result<u32> {
-        if let Some(sev) = self.sev.lock().unwrap().as_mut() {
-            let config = self.config.lock().unwrap();
-            let kernel_path = config.kernel.as_ref();
-            let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
-            let firmware_path = &config.sev.as_ref().unwrap().firmware;
-            let need_kernel = sev.load_firmware(mem.deref(), firmware_path).unwrap();
-            //Only load the kernel if not using ovmf
-            if need_kernel {
-                match kernel_path {
-                    Some(config) => {
-                        let len = sev.load_kernel(mem.deref(), &config.path).unwrap();
-                        return Ok(len);
-                    }
-                    None => return Err(Error::SevMissingKernel),
+    fn setup_sev(
+        sev: &mut Sev, 
+        config: &Arc<Mutex<VmConfig>>,
+        memory_manager: &Arc<Mutex<MemoryManager>>
+    ) -> Result<()> {
+        let config = config.lock().unwrap();
+        let kernel_path = config.kernel.as_ref();
+        let mem = memory_manager.lock().unwrap().guest_memory().memory();
+        let firmware_path = &config.sev.as_ref().unwrap().firmware;
+        let need_kernel = sev.load_firmware(mem.deref(), firmware_path).unwrap();
+        //Only load the kernel if not using ovmf
+        if need_kernel {
+            match kernel_path {
+                Some(config) => {
+                    sev.load_kernel(mem.deref(), &config.path).unwrap();
                 }
+                None => return Err(Error::SevMissingKernel),
             }
         }
 
-        Ok(0)
+        Ok(())
     }
 
     #[cfg(feature = "tdx")]
@@ -2141,26 +2171,22 @@ impl Vm {
         );
         info!("Created ACPI tables: rsdp_addr = 0x{:x}", rsdp_addr.0);
 
-        // if let Some(sev) = self.sev.lock().unwrap().as_mut() {
-        //     let addr = mem.get_host_address(rsdp_addr).unwrap() as u64;
-        //     let addr = addr - (addr % 16);
-        //     let len = Rsdp::len();
-        //     println!("calculated len 0x{:x}", len);
-        //     // let len = len - (len % 16) + 16;
-        //     sev.launch_update_data(addr, len as u32).unwrap();
-        // }
-
         Some(rsdp_addr)
     }
 
     #[cfg(target_arch = "x86_64")]
     fn entry_point(&mut self) -> Result<Option<EntryPoint>> {
-        #[cfg(feature = "sev")]
-        if let Some(sev) = self.sev.lock().unwrap().as_mut() {
-            return Ok(Some(EntryPoint {
-                entry_addr: Some(sev.entry_point()),
-            }));
+        
+        if self.sev.is_some() {
+            return Ok(
+                Some(
+                    EntryPoint {
+                        entry_addr: Some(self.sev.as_ref().unwrap().entry_point())
+                    }
+                )
+            )
         }
+
         self.load_kernel_handle
             .take()
             .map(|handle| handle.join().map_err(Error::KernelLoadThreadJoin)?)
@@ -2197,13 +2223,6 @@ impl Vm {
 
         self.setup_signal_handler()?;
         self.setup_tty()?;
-
-        #[cfg(feature = "sev")]
-        let mut kernel_len = 0u32;
-        #[cfg(feature = "sev")]
-        if self.sev.lock().unwrap().is_some() {
-            kernel_len = self.setup_sev()?;
-        }
 
         // Load kernel synchronously or if asynchronous then wait for load to
         // finish.
@@ -2251,44 +2270,24 @@ impl Vm {
                 // the entry_point is Some.
                 self.configure_system(
                     rsdp_addr.unwrap(),
-                    #[cfg(feature = "sev")]
-                    kernel_len,
                 )
             })
             .transpose()?;
 
-        #[cfg(all(feature = "sev", target_arch = "x86_64"))]
-        if self.sev.lock().unwrap().is_some() {
+        // Encrypt SEV firmware
+        #[cfg(feature = "sev")]
+        if let Some(sev) = self.sev.as_mut() {        
             let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
             let mut cmdline = Self::generate_cmdline(&self.config).unwrap();
             cmdline.insert_str("acpi=off").unwrap();
 
             linux_loader::loader::load_cmdline(mem.deref(), CMDLINE_START, &cmdline).unwrap();
             let addr = mem.get_host_address(CMDLINE_START).unwrap() as u64;
-            let addr = addr - (addr % 16);
-            let len = cmdline.as_str().len();
-            let len = len - (len % 16) + 16;
-            self.sev
-                .lock()
-                .unwrap()
-                .as_mut()
-                .unwrap()
-                .launch_update_data(addr, len as u32)
-                .unwrap();
-            self.sev
-                .lock()
-                .unwrap()
-                .as_mut()
-                .unwrap()
-                .get_launch_measurement()
-                .unwrap();
-            self.sev
-                .lock()
-                .unwrap()
-                .as_mut()
-                .unwrap()
-                .sev_launch_finish()
-                .unwrap();
+            let len = cmdline.as_str().len() as u64;
+
+            sev.launch_update_data(addr, len as u32).unwrap();
+            sev.get_launch_measurement().unwrap();
+            sev.sev_launch_finish().unwrap();
         }
 
         #[cfg(feature = "tdx")]

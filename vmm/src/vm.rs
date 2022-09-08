@@ -2176,7 +2176,7 @@ impl Vm {
 
     #[cfg(target_arch = "x86_64")]
     fn entry_point(&mut self) -> Result<Option<EntryPoint>> {
-        
+        #[cfg(feature = "sev")]
         if self.sev.is_some() {
             return Ok(
                 Some(

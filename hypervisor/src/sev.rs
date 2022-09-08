@@ -337,7 +337,10 @@ impl Sev {
     }
 
     pub fn encrypt_firmware(&mut self) -> SevResult<()> {
-        self.launch_update_data(self.fw_start, self.fw_len)
+        info!("Pre-encrypting firmware addr 0x{:x} len 0x{:x}", self.fw_start, self.fw_len);
+        let result = self.launch_update_data(self.fw_start, self.fw_len);
+        info!("Pre-encryption done");
+        result
     }
 
     pub fn launch_update_data(&mut self, mut addr: u64, mut len: u32) -> SevResult<()> {
@@ -371,12 +374,7 @@ impl Sev {
             ..Default::default()
         };
 
-        info!("Pre-encrypting firmware addr 0x{:x} len 0x{:x}", addr, len);
-
         self.sev_ioctl(&mut msg).unwrap();
-
-        info!("Pre-encryption done");
-
 
         Ok(())
     }

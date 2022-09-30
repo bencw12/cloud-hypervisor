@@ -1259,7 +1259,7 @@ impl MemoryManager {
             Self::open_memory_file(backing_file, file_offset, size, hugepages, hugepage_size)?
         };
 
-        let mut mmap_flags = libc::MAP_NORESERVE
+        let mut mmap_flags = libc::MAP_NORESERVE | libc::MAP_ANONYMOUS
             | if shared {
                 libc::MAP_SHARED
             } else {
@@ -1493,6 +1493,27 @@ impl MemoryManager {
             .create_user_memory_region(mem_region)
             .map_err(Error::CreateUserMemoryRegion)?;
 
+        let hugepage = true;
+
+        if hugepage {
+            let ret = unsafe {
+                libc::madvise(
+                    userspace_addr as *mut libc::c_void,
+                    memory_size as libc::size_t,
+                    libc::MADV_HUGEPAGE,
+                )
+            };
+            if ret != 0 {
+                let err = io::Error::last_os_error();
+                let errno = err.raw_os_error().unwrap();
+                if errno == libc::EINVAL {
+                    println!("kernel not configured with CONFIG_TRANSPARENT_HUGEPAGE");
+                } else {
+                    println!("madvise error: {}", err);
+                }
+                println!("failed to back memory region with huge pages");
+            }
+        }
         // Mark the pages as mergeable if explicitly asked for.
         if mergeable {
             // Safe because the address and size are valid since the

@@ -2145,8 +2145,6 @@ impl SevConfig {
             Some(_s) => true,
             _ => false,
         };
-
-        println!("{}", encryption);
         
         Ok(SevConfig { firmware, encryption })
     }

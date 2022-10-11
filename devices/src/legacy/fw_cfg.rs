@@ -1,8 +1,9 @@
-use std::{path::PathBuf, fs::File, io::{Seek, SeekFrom, Read}, mem, fmt};
+use std::{path::PathBuf, fs::File, io::{Seek, SeekFrom, Read}, mem, fmt, sync::{Arc, Mutex}};
 
+use hypervisor::sev::{self, Sev};
 use linux_loader::{bootparam::setup_header, elf::{elf64_phdr, elf64_hdr}, elf};
 use vm_device::BusDevice;
-use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap, bitmap::AtomicBitmap, Bytes, ByteValued, GuestAddressSpace, GuestAddress};
+use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap, bitmap::AtomicBitmap, Bytes, ByteValued, GuestAddressSpace, GuestAddress, GuestMemory};
 
 //Constants for partial loading the kernel
 const BZIMAGE_HEADER_OFFSET: u64 = 0x1f1;
@@ -135,7 +136,12 @@ pub struct FwCfg {
 }
 
 impl FwCfg {
-    pub fn new(kernel_path: PathBuf, mem: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>, _id: String) -> Self {
+    pub fn new(
+        kernel_path: PathBuf, 
+        hashes_path: &PathBuf, 
+        mem: GuestMemoryAtomic<GuestMemoryMmap<AtomicBitmap>>, 
+        sev: Arc<Mutex<Option<Sev>>>,
+        _id: String) -> Self {
         info!("Creating fw_cfg device");
 
         let mut kernel = File::open(kernel_path).unwrap();
@@ -164,7 +170,29 @@ impl FwCfg {
             fw_cfg.get_bzimage_size().unwrap();
         }
 
+        fw_cfg.add_kernel_hashes(hashes_path, sev);
+
         fw_cfg
+    }
+
+    fn add_kernel_hashes(&self, hashes_path: &PathBuf, sev: Arc<Mutex<Option<Sev>>>) {
+        let num_hashes = match self.kernel_type {
+            KernelType::BzImage => 1,
+            KernelType::Direct => 3,
+        };
+
+        let hashes_base_addr = GuestAddress(sev::FIRMWARE_ADDR.0 - (num_hashes * 32));
+
+        let mut hashes = File::open(hashes_path).unwrap();
+        self.mem.memory()
+            .read_exact_from(hashes_base_addr, &mut hashes, num_hashes as usize * 32).unwrap();
+
+        let addr = 
+            self.mem.memory().get_host_address(hashes_base_addr).unwrap() as u64;
+        
+        if let Some(sev) = sev.lock().unwrap().as_mut() {
+            sev.launch_update_data(addr, (num_hashes * 32).try_into().unwrap()).unwrap();
+        }
     }
 
     ///Parse uncompressed kernel ELF and save loadable phdrs/entry point 

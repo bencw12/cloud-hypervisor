@@ -50,6 +50,7 @@ use devices::legacy::Serial;
 use devices::{
     interrupt_controller, interrupt_controller::InterruptController, AcpiNotificationFlags,
 };
+use hypervisor::sev::Sev;
 use hypervisor::{DeviceFd, HypervisorVmError, IoEventAddress};
 use libc::{
     cfmakeraw, isatty, tcgetattr, tcsetattr, termios, MAP_NORESERVE, MAP_PRIVATE, MAP_SHARED,
@@ -944,6 +945,8 @@ pub struct DeviceManager {
 
     // Pending activations
     pending_activations: Arc<Mutex<Vec<VirtioPciDeviceActivator>>>,
+
+    sev: Arc<Mutex<Option<Sev>>>,
 }
 
 impl DeviceManager {
@@ -961,6 +964,7 @@ impl DeviceManager {
         restoring: bool,
         boot_id_list: BTreeSet<String>,
         timestamp: Instant,
+        sev: Arc<Mutex<Option<Sev>>>,
     ) -> DeviceManagerResult<Arc<Mutex<Self>>> {
         let device_tree = Arc::new(Mutex::new(DeviceTree::new()));
 
@@ -1086,6 +1090,7 @@ impl DeviceManager {
             boot_id_list,
             timestamp,
             pending_activations: Arc::new(Mutex::new(Vec::default())),
+            sev,
         };
 
         let device_manager = Arc::new(Mutex::new(device_manager));
@@ -1129,7 +1134,9 @@ impl DeviceManager {
         let interrupt_controller = self.add_interrupt_controller()?;
 
         #[cfg(feature="sev")]
-        self.add_fw_cfg()?;
+        if self.sev.lock().unwrap().is_some(){
+            self.add_fw_cfg()?;
+        }
 
         // Now we can create the legacy interrupt manager, which needs the freshly
         // formed IOAPIC device.
@@ -1352,6 +1359,7 @@ impl DeviceManager {
     fn add_fw_cfg(
         &mut self,
     ) -> DeviceManagerResult<Arc<Mutex<FwCfg>>> {
+
         let id = String::from(FWCFG_DEVICE_NAME);
         let memory = self.memory_manager
             .lock()
@@ -1360,6 +1368,7 @@ impl DeviceManager {
 
         let config = self.config.lock().unwrap();
         let kernel_conf = config.kernel.as_ref();
+        let hashes_conf = &config.sev.as_ref().unwrap().kernel_hashes;
 
         if kernel_conf.is_none(){
             panic!("fw_cfg: Missing kernel path!");
@@ -1370,7 +1379,9 @@ impl DeviceManager {
                 Mutex::new(
                     FwCfg::new(
                         kernel_conf.unwrap().path.clone(),
+                        hashes_conf,
                         memory.clone(),
+                        self.sev.clone(),
                         id.clone())));
         self.address_manager
             .mmio_bus

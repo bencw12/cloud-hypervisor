@@ -497,7 +497,7 @@ pub struct Vm {
     #[cfg(target_arch = "x86_64")]
     load_kernel_handle: Option<thread::JoinHandle<Result<EntryPoint>>>,
     #[cfg(all(feature = "sev", target_arch = "x86_64"))]
-    sev: Option<Sev>,
+    sev: Arc<Mutex<Option<Sev>>>,
 }
 
 impl Vm {
@@ -534,8 +534,8 @@ impl Vm {
             }
             sev = Some(sev_dev);
         }
-        // #[cfg(feature = "sev")]
-        // let sev_mutex = Arc::new(Mutex::new(sev));
+        #[cfg(feature = "sev")]
+        let sev_mutex = Arc::new(Mutex::new(sev));
 
         #[cfg(target_arch = "x86_64")]
         let load_kernel_handle = if !restoring {
@@ -544,7 +544,7 @@ impl Vm {
                 &memory_manager,
                 &config,
                 #[cfg(feature = "sev")]
-                &mut sev,
+                sev_mutex.clone(),
             )?
         } else {
             None
@@ -587,6 +587,7 @@ impl Vm {
             restoring,
             boot_id_list,
             timestamp,
+            sev_mutex.clone(),
         )
         .map_err(Error::DeviceManager)?;
 
@@ -641,7 +642,7 @@ impl Vm {
             .map_err(Error::InitramfsFile)?;
 
         #[cfg(feature = "sev")]
-        if let Some(sev) = sev.as_mut() {
+        if let Some(sev) = sev_mutex.lock().unwrap().as_mut() {
             sev.encrypt_firmware().unwrap();
         }
 
@@ -669,7 +670,7 @@ impl Vm {
             #[cfg(target_arch = "x86_64")]
             load_kernel_handle,
             #[cfg(all(feature = "sev", target_arch = "x86_64"))]
-            sev: sev,
+            sev: sev_mutex,
         })
     }
 
@@ -1122,7 +1123,7 @@ impl Vm {
         kernel: &Option<File>,
         memory_manager: &Arc<Mutex<MemoryManager>>,
         config: &Arc<Mutex<VmConfig>>,
-        #[cfg(feature = "sev")] sev: &mut Option<Sev>,
+        #[cfg(feature = "sev")] sev: Arc<Mutex<Option<Sev>>>,
     ) -> Result<Option<thread::JoinHandle<Result<EntryPoint>>>> {
         // Kernel with TDX is loaded in a different manner
         #[cfg(feature = "tdx")]
@@ -1131,8 +1132,8 @@ impl Vm {
         }
         // If using SEV load kernel differently
         #[cfg(feature = "sev")]
-        if sev.is_some() {
-            Self::setup_sev(sev.as_mut().unwrap(), &config, &memory_manager).unwrap();
+        if let Some(sev) = sev.lock().unwrap().as_mut() {
+            Self::setup_sev(sev, &config, &memory_manager).unwrap();
             return Ok(None);
         }
 
@@ -1184,6 +1185,9 @@ impl Vm {
             .platform
             .as_ref()
             .and_then(|p| p.serial_number.clone());
+        
+        #[cfg(feature = "sev")]
+        let sev = &mut self.sev.lock().unwrap();
 
         arch::configure_system(
             &mem,
@@ -1194,7 +1198,7 @@ impl Vm {
             sgx_epc_region,
             serial_number.as_deref(),
             #[cfg(feature = "sev")]
-            &mut self.sev,
+            sev,
         )
         .map_err(Error::ConfigureSystem)?;
         Ok(())
@@ -2152,11 +2156,11 @@ impl Vm {
     #[cfg(target_arch = "x86_64")]
     fn entry_point(&mut self) -> Result<Option<EntryPoint>> {
         #[cfg(feature = "sev")]
-        if self.sev.is_some() {
+        if let Some(sev) = self.sev.lock().unwrap().as_ref() {
             return Ok(
                 Some(
                     EntryPoint {
-                        entry_addr: Some(self.sev.as_ref().unwrap().entry_point())
+                        entry_addr: Some(sev.entry_point())
                     }
                 )
             )
@@ -2251,7 +2255,7 @@ impl Vm {
 
         // Encrypt SEV firmware
         #[cfg(feature = "sev")]
-        if let Some(sev) = self.sev.as_mut() {        
+        if let Some(sev) = self.sev.lock().unwrap().as_mut() {        
             let mem = self.memory_manager.lock().unwrap().guest_memory().memory();
             let mut cmdline = Self::generate_cmdline(&self.config).unwrap();
             cmdline.insert_str("acpi=off").unwrap();

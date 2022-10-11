@@ -24,7 +24,7 @@ use vm_memory::GuestAddress;
 use vm_memory::GuestMemory;
 
 const MEASUREMENT_LEN: u32 = 48;
-const FIRMWARE_ADDR: GuestAddress = GuestAddress(0x100000); //1M
+pub const FIRMWARE_ADDR: GuestAddress = GuestAddress(0x100000); //1M
 // const KERNEL_ADDR: u64 = 0x4000000; // 64M
 //Disable debug
 const DEFAULT_POLICY: u32 = 1;
@@ -196,28 +196,29 @@ impl Sev {
 
     //     Ok(())
     // }
-    
+
     // Load the SEV firmware and encrypt
     pub fn load_firmware<M: GuestMemory>(
         &mut self,
         mem: &M,
         firmware_path: &PathBuf,
-    ) -> Result<bool, Error> {
+    ) -> Result<(), Error> {
         use linux_loader::loader::{elf::Error::InvalidElfMagicNumber, Error::Elf};
-        let mut f = File::open(firmware_path.as_path()).unwrap();
-        f.seek(SeekFrom::Start(0)).unwrap();
-        let len = f.seek(SeekFrom::End(0)).unwrap();
-        f.seek(SeekFrom::Start(0)).unwrap();
+        let mut f_firmware = File::open(firmware_path.as_path()).unwrap();
+        f_firmware.seek(SeekFrom::Start(0)).unwrap();
+        let len = f_firmware.seek(SeekFrom::End(0)).unwrap();
+        f_firmware.seek(SeekFrom::Start(0)).unwrap();
 
         //Check if firmware is pvh elf
         match linux_loader::loader::elf::Elf::load(
             mem, 
             None, 
-            &mut f, 
+            &mut f_firmware, 
             Some(GuestAddress(0x100000)),
         ) {
             Ok(entry_addr) => {
                 //Need to encrypt ovmf here
+                //TODO support kernel hashes with OVMF
                 let addr = mem.get_host_address(FIRMWARE_ADDR).unwrap() as u64;
                 let len = entry_addr.kernel_end - FIRMWARE_ADDR.0;
                 
@@ -228,19 +229,16 @@ impl Sev {
             },
             Err(e) => match e {
                 Elf(InvalidElfMagicNumber) => {
-                    f.seek(SeekFrom::Start(0)).unwrap();
+                    f_firmware.seek(SeekFrom::Start(0)).unwrap();
                     //If not an elf try flat binary firmware
-                    mem.read_exact_from(FIRMWARE_ADDR, &mut f, len.try_into().unwrap())
+                    mem.read_exact_from(FIRMWARE_ADDR, &mut f_firmware, len.try_into().unwrap())
                         .unwrap();
                     let addr = mem.get_host_address(FIRMWARE_ADDR).unwrap() as u64;
-
-                    // self.launch_update_data(addr, len as u32).unwrap();
 
                     self.fw_start = addr;
                     self.fw_len = len as u32;
                     self.entry_point = FIRMWARE_ADDR;
-                    //also need a kernel if we loaded sev-fw
-                    return Ok(true);
+                    return Ok(());
                 }
                 _ => {
                     return Err(Error::FirmwareLoad);
@@ -248,7 +246,7 @@ impl Sev {
             },
         };
 
-        Ok(false)
+        Ok(())
     }
 
     fn sev_ioctl(&mut self, cmd: &mut kvm_sev_cmd) -> SevResult<()> {
@@ -375,8 +373,9 @@ impl Sev {
             ..Default::default()
         };
 
+        info!("Pre-encrypting region...");
         self.sev_ioctl(&mut msg).unwrap();
-
+        info!("Done");
         Ok(())
     }
 

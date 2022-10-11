@@ -25,7 +25,7 @@ use vm_memory::GuestMemory;
 
 const MEASUREMENT_LEN: u32 = 48;
 const FIRMWARE_ADDR: GuestAddress = GuestAddress(0x100000); //1M
-const KERNEL_ADDR: u64 = 0x4000000; // 64M
+// const KERNEL_ADDR: u64 = 0x4000000; // 64M
 //Disable debug
 const DEFAULT_POLICY: u32 = 1;
 
@@ -179,23 +179,24 @@ impl Sev {
     }
 
     // load kernel unencrypted
-    pub fn load_kernel<M: GuestMemory>(
-        &mut self,
-        mem: &M,
-        kernel_path: &PathBuf,
-    ) -> SevResult<()> {
-        let mut f = File::open(kernel_path.as_path()).unwrap();
-        f.seek(SeekFrom::Start(0)).unwrap();
-        let len = f.seek(SeekFrom::End(0)).unwrap();
-        f.seek(SeekFrom::Start(0)).unwrap();
+    // pub fn load_kernel<M: GuestMemory>(
+    //     &mut self,
+    //     mem: &M,
+    //     kernel_path: &PathBuf,
+    // ) -> SevResult<()> {
+    //     let mut f = File::open(kernel_path.as_path()).unwrap();
+    //     f.seek(SeekFrom::Start(0)).unwrap();
+    //     let len = f.seek(SeekFrom::End(0)).unwrap();
+    //     f.seek(SeekFrom::Start(0)).unwrap();
 
-        mem.read_exact_from(GuestAddress(KERNEL_ADDR), &mut f, len.try_into().unwrap())
-            .unwrap();
+    //     mem.read_exact_from(GuestAddress(KERNEL_ADDR), &mut f, len.try_into().unwrap())
+    //         .unwrap();
 
-        self.kernel_len = len as u32;
+    //     self.kernel_len = 0 as u32;
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
+    
     // Load the SEV firmware and encrypt
     pub fn load_firmware<M: GuestMemory>(
         &mut self,

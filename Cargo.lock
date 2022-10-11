@@ -208,6 +208,7 @@ dependencies = [
  "epoll",
  "hypervisor",
  "libc",
+ "linux-loader",
  "log",
  "versionize",
  "versionize_derive",

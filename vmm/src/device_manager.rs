@@ -105,8 +105,12 @@ use vm_virtio::AccessPlatform;
 use vm_virtio::VirtioDeviceType;
 use vmm_sys_util::eventfd::EventFd;
 
+use devices::legacy::FwCfg;
+
 #[cfg(target_arch = "aarch64")]
 const MMIO_LEN: u64 = 0x1000;
+
+const FWCFG_DEVICE_NAME: &str = "__fwcfg";
 
 // Singleton devices / devices the user cannot name
 #[cfg(target_arch = "x86_64")]
@@ -1124,6 +1128,9 @@ impl DeviceManager {
 
         let interrupt_controller = self.add_interrupt_controller()?;
 
+        #[cfg(feature="sev")]
+        self.add_fw_cfg()?;
+
         // Now we can create the legacy interrupt manager, which needs the freshly
         // formed IOAPIC device.
         let legacy_interrupt_manager: Arc<
@@ -1339,6 +1346,46 @@ impl DeviceManager {
     #[cfg(target_arch = "aarch64")]
     pub fn get_interrupt_controller(&mut self) -> Option<&Arc<Mutex<gic::Gic>>> {
         self.interrupt_controller.as_ref()
+    }
+
+    #[cfg(feature="sev")]
+    fn add_fw_cfg(
+        &mut self,
+    ) -> DeviceManagerResult<Arc<Mutex<FwCfg>>> {
+        let id = String::from(FWCFG_DEVICE_NAME);
+        let memory = self.memory_manager
+            .lock()
+            .unwrap()
+            .guest_memory();
+
+        let config = self.config.lock().unwrap();
+        let kernel_conf = config.kernel.as_ref();
+
+        if kernel_conf.is_none(){
+            panic!("fw_cfg: Missing kernel path!");
+        }
+
+        let fw_cfg = 
+            Arc::new(
+                Mutex::new(
+                    FwCfg::new(
+                        kernel_conf.unwrap().path.clone(),
+                        memory.clone(),
+                        id.clone())));
+        self.address_manager
+            .mmio_bus
+            .insert(fw_cfg.clone(), devices::legacy::FW_CFG_REG, 0x11)
+            .map_err(DeviceManagerError::BusError)?;
+
+        self.bus_devices
+            .push(Arc::clone(&fw_cfg) as Arc<Mutex<dyn BusDevice>>);
+
+        // self.device_tree
+        //     .lock()
+        //     .unwrap()
+        //     .insert(id.clone(), device_node!(id, fw_cfg));
+
+        Ok(fw_cfg)
     }
 
     #[cfg(target_arch = "x86_64")]

@@ -1135,32 +1135,6 @@ impl Vm {
             Self::setup_sev(sev.as_mut().unwrap(), &config, &memory_manager).unwrap();
             return Ok(None);
         }
-        // #[cfg(feature = "sev")]
-        // if sev.lock()
-        //     .unwrap()
-        //     .is_some() {
-            
-        //     let sev = sev.clone();
-        //     let config = config.clone();
-        //     let memory_manager = memory_manager.clone();
-
-        //     return Some(std::thread::Builder::new()
-        //         .name("sev_kernel_loader".into())
-        //         .spawn(move || {
-        //             #[cfg(feature = "sev")]
-        //             Self::setup_sev(&sev, &config, &memory_manager).unwrap();
-        //             return Ok(EntryPoint {
-        //                 entry_addr: 
-        //                     Some(sev
-        //                         .lock()
-        //                         .unwrap()
-        //                         .as_ref()
-        //                         .unwrap()
-        //                         .entry_point())
-        //             })
-        //         })
-        //         .map_err(Error::KernelLoadThreadSpawn)).transpose();
-        // }
 
         kernel
             .as_ref()
@@ -1809,19 +1783,20 @@ impl Vm {
         memory_manager: &Arc<Mutex<MemoryManager>>
     ) -> Result<()> {
         let config = config.lock().unwrap();
-        let kernel_path = config.kernel.as_ref();
+        // let kernel_path = config.kernel.as_ref();
         let mem = memory_manager.lock().unwrap().guest_memory().memory();
         let firmware_path = &config.sev.as_ref().unwrap().firmware;
-        let need_kernel = sev.load_firmware(mem.deref(), firmware_path).unwrap();
+        sev.load_firmware(mem.deref(), firmware_path).unwrap();
+        // let need_kernel = sev.load_firmware(mem.deref(), firmware_path).unwrap();
         //Only load the kernel if not using ovmf
-        if need_kernel {
-            match kernel_path {
-                Some(config) => {
-                    sev.load_kernel(mem.deref(), &config.path).unwrap();
-                }
-                None => return Err(Error::SevMissingKernel),
-            }
-        }
+        // if need_kernel {
+        //     match kernel_path {
+        //         Some(config) => {
+        //             sev.load_kernel(mem.deref(), &config.path).unwrap();
+        //         }
+        //         None => return Err(Error::SevMissingKernel),
+        //     }
+        // }
 
         Ok(())
     }

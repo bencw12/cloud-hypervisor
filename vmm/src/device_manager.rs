@@ -1384,8 +1384,8 @@ impl DeviceManager {
                         self.sev.clone(),
                         id.clone())));
         self.address_manager
-            .mmio_bus
-            .insert(fw_cfg.clone(), devices::legacy::FW_CFG_REG, 0x11)
+            .io_bus
+            .insert(fw_cfg.clone(), devices::legacy::FW_CFG_REG, 0x4)
             .map_err(DeviceManagerError::BusError)?;
 
         self.bus_devices

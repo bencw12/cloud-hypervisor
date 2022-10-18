@@ -9,11 +9,11 @@ use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap, bitmap::AtomicBitmap, Bytes,
 const BZIMAGE_HEADER_OFFSET: u64 = 0x1f1;
 const BZIMAGE_HEADER_MAGIC: u32 = 0x53726448;
 
-const BZIMAGE_CODE: u64 = 0x0;
-const DIRECT_CODE: u64 = 0x1;
-const DATA_REGION_SIZE: u64 = 0x200000; // 2MB
+const BZIMAGE_CODE: u32 = 0x0;
+const DIRECT_CODE: u32 = 0x1;
+const DATA_REGION_SIZE: u64 = 0x200000; // 4K
 const DATA_REGION_ADDR: u64 = 0x200000; // 2MB - kernel must be loaded after 6MB
-pub const FW_CFG_REG: u64 = 0x40000000 - 8;
+pub const FW_CFG_REG: u64 = 0x81;
 
 #[derive(PartialEq, Copy, Clone)]
 enum KernelType {
@@ -83,10 +83,10 @@ impl fmt::Display for Error {
     }
 }
 
-impl TryFrom<u64> for Command {
+impl TryFrom<u32> for Command {
     type Error = Error;
 
-    fn try_from(code: u64) -> Result<Self, Self::Error> {
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
         match code {
             0 => Ok(Self::KernelType),
             1 => Ok(Self::BzImageLen),
@@ -99,8 +99,8 @@ impl TryFrom<u64> for Command {
     }
 }
 
-impl Into<u64> for Command {
-    fn into(self) -> u64 {
+impl Into<u32> for Command {
+    fn into(self) -> u32 {
         match self {
             Self::KernelType => 0, 
             Self::BzImageLen => 1,
@@ -113,7 +113,7 @@ impl Into<u64> for Command {
 }
 
 impl KernelType {
-    fn value(&self) -> u64 {
+    fn value(&self) -> u32 {
         match *self {
             Self::BzImage => BZIMAGE_CODE,
             Self::Direct => DIRECT_CODE,
@@ -270,13 +270,13 @@ impl FwCfg {
 impl BusDevice for FwCfg {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
 
-        if offset != 0 || data.len() < 8 {
+        if offset != 0 || data.len() < 4 {
             info!("fw_cfg invalid read address");
         } else {
             match self.cmd {
                 Some(Command::KernelType) => {
                     if self.state == State::WriteKernelType {
-                        let type_buf = u64::to_le_bytes(self.kernel_type.value());
+                        let type_buf = u32::to_le_bytes(self.kernel_type.value());
                         data.copy_from_slice(&type_buf);
                         if self.kernel_type == KernelType::Direct {
                             self.state = State::WriteElfHdr;
@@ -302,7 +302,6 @@ impl BusDevice for FwCfg {
                 },
                 Some(Command::PhdrData) => {
                     if self.state == State::WritePhdrs {
-                        //Check if program headers are smaller than 2MB
                         if let Some(phdrs) = &mut self.phdrs {
                             let phdr = phdrs.get(self.cur_phdr).unwrap();
                             self.mem
@@ -342,17 +341,20 @@ impl BusDevice for FwCfg {
                                 write_len = bytes_left;
                             }
                             //Offset is kernel file offset plus last position in segment
-                            let pos = phdr.p_offset + self.seg_pos;
+                            // let pos = phdr.p_offset + self.seg_pos;
                             //Seek to offset in segment
-                            self.kernel
+                            if self.seg_pos == 0 {
+                                self.kernel
                                 .seek(
-                                    SeekFrom::Start(pos)
+                                    SeekFrom::Start(phdr.p_offset)
                                 ).unwrap();
+                            }
+                           
                             //Write segment bytes to data region
                             self.mem
                                 .memory()
                                 .read_exact_from(
-                                    GuestAddress(DATA_REGION_SIZE), 
+                                    GuestAddress(DATA_REGION_ADDR), 
                                     &mut self.kernel, 
                                     write_len as usize)
                                     .unwrap();
@@ -373,7 +375,7 @@ impl BusDevice for FwCfg {
                 },
                 Some(Command::BzImageLen) => {
                     if self.state == State::WriteBzImageLen {
-                        let len_buf = u64::to_le_bytes(self.kernel_len);
+                        let len_buf = u32::to_le_bytes(self.kernel_len as u32);
                         data.copy_from_slice(&len_buf);
                         self.state = State::WriteBzImageData;
                     } else {
@@ -408,13 +410,13 @@ impl BusDevice for FwCfg {
     ) -> Option<std::sync::Arc<std::sync::Barrier>> {
 
         //Only allow writes to 8 bytes before the page to load data
-        if offset != 0 || data.len() < 8 {
+        if offset != 0 || data.len() < 4 {
             info!("fw_cfg invalid write");
             return None;
         } else {
-            let mut buf: [u8; 8] = Default::default();
-            buf.copy_from_slice(&data[0..8]);
-            let code = u64::from_le_bytes(buf);
+            let mut buf: [u8; 4] = Default::default();
+            buf.copy_from_slice(&data[0..4]);
+            let code = u32::from_le_bytes(buf);
             let result = Command::try_from(code);
             match result {
                 Ok(cmd) => self.cmd = Some(cmd),

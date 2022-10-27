@@ -271,6 +271,7 @@ impl Sev {
     }
 
     pub fn sev_init(&mut self) -> SevResult<()> {
+        info!("Sending SEV_INIT");
         if self.state != State::UnInit {
             return Err(SevError::InvalidPlatformState);
         }
@@ -284,11 +285,15 @@ impl Sev {
         self.sev_ioctl(&mut init).unwrap();
 
         self.state = State::Init;
+        info!("Done Sending SEV_INIT");
+
 
         self.sev_launch_start()
     }
 
     fn sev_launch_start(&mut self) -> SevResult<()> {
+        info!("Sending LAUNCH_START");
+
         if self.state != State::Init {
             return Err(SevError::InvalidPlatformState);
         }
@@ -311,6 +316,7 @@ impl Sev {
 
         self.handle = start.handle;
         self.state = State::LaunchUpdate;
+        info!("Done Sending LAUNCH_START");
         Ok(())
     }
 
@@ -336,9 +342,9 @@ impl Sev {
     }
 
     pub fn encrypt_firmware(&mut self) -> SevResult<()> {
-        info!("Pre-encrypting firmware addr 0x{:x} len 0x{:x}", self.fw_start, self.fw_len);
+        // info!("Pre-encrypting firmware addr 0x{:x} len 0x{:x}", self.fw_start, self.fw_len);
         let result = self.launch_update_data(self.fw_start, self.fw_len);
-        info!("Pre-encryption done");
+        // info!("Pre-encryption done");
         result
     }
 
@@ -375,11 +381,13 @@ impl Sev {
 
         info!("Pre-encrypting region...");
         self.sev_ioctl(&mut msg).unwrap();
-        info!("Done");
+        info!("Pre-encryption done");
         Ok(())
     }
 
     pub fn get_launch_measurement(&mut self) -> SevResult<()> {
+        info!("Sending LAUNCH_MEASURE");
+
         if !self.encryption {
             return Ok(());
         }
@@ -408,6 +416,8 @@ impl Sev {
         self.sev_ioctl(&mut msg).unwrap();
 
         self.state = State::LaunchSecret;
+        info!("Done Sending LAUNCH_MEASURE");
+
         Ok(())
     }
 
@@ -447,6 +457,8 @@ impl Sev {
     }
 
     pub fn sev_launch_finish(&mut self) -> SevResult<()> {
+        info!("Sending LAUNCH_FINISH");
+
         if !self.encryption {
             return Ok(());
         }
@@ -464,6 +476,7 @@ impl Sev {
         self.sev_ioctl(&mut msg).unwrap();
 
         self.state = State::Running;
+        info!("Done Sending LAUNCH_FINISH");
 
         Ok(())
     }

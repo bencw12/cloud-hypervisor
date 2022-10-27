@@ -528,11 +528,13 @@ impl Vm {
         let mut sev = None;
         #[cfg(feature = "sev")]
         if config.lock().unwrap().sev.is_some() {
+            info!("Initializing SEV");
             let mut sev_dev = Sev::new(vm.fd().clone(), config.lock().unwrap().sev.as_ref().unwrap().encryption);
             if config.lock().unwrap().sev.as_ref().unwrap().encryption {
                 sev_dev.sev_init().unwrap();
             }
             sev = Some(sev_dev);
+            info!("Done Initializing SEV");
         }
         #[cfg(feature = "sev")]
         let sev_mutex = Arc::new(Mutex::new(sev));
@@ -1133,7 +1135,9 @@ impl Vm {
         // If using SEV load kernel differently
         #[cfg(feature = "sev")]
         if let Some(sev) = sev.lock().unwrap().as_mut() {
+            info!("Setup SEV");
             Self::setup_sev(sev, &config, &memory_manager).unwrap();
+            info!("Done Setup SEV");
             return Ok(None);
         }
 
@@ -1791,16 +1795,6 @@ impl Vm {
         let mem = memory_manager.lock().unwrap().guest_memory().memory();
         let firmware_path = &config.sev.as_ref().unwrap().firmware;
         sev.load_firmware(mem.deref(), firmware_path).unwrap();
-        // let need_kernel = sev.load_firmware(mem.deref(), firmware_path).unwrap();
-        //Only load the kernel if not using ovmf
-        // if need_kernel {
-        //     match kernel_path {
-        //         Some(config) => {
-        //             sev.load_kernel(mem.deref(), &config.path).unwrap();
-        //         }
-        //         None => return Err(Error::SevMissingKernel),
-        //     }
-        // }
 
         Ok(())
     }

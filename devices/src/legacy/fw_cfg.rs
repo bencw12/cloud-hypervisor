@@ -11,8 +11,8 @@ const BZIMAGE_HEADER_MAGIC: u32 = 0x53726448;
 
 const BZIMAGE_CODE: u32 = 0x0;
 const DIRECT_CODE: u32 = 0x1;
-const DATA_REGION_SIZE: u64 = 0x200000; // 4K
-const DATA_REGION_ADDR: u64 = 0x200000; // 2MB - kernel must be loaded after 6MB
+const DATA_REGION_SIZE: u64 = 0x200000;  
+const DATA_REGION_ADDR: u64 = 0x200000; 
 pub const FW_CFG_REG: u64 = 0x81;
 
 #[derive(PartialEq, Copy, Clone)]
